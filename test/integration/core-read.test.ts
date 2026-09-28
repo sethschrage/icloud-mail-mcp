@@ -229,7 +229,7 @@ describe('get_message', () => {
   it('lists attachments with part numbers and never downloads their bytes', async () => {
     const view = await svc.getMessage({ mailbox: 'INBOX', uid: 6 });
     expect(view.message.attachments).toEqual([
-      { part: '2', filename: 'Invoice-10423.pdf', content_type: 'application/pdf', size: expect.any(Number) as number, inline: false, content_id: null },
+      { part: '2', filename: 'Invoice-10423.pdf', content_type: 'application/pdf', size: expect.any(Number) as number, encoding: 'base64', inline: false, content_id: null },
     ]);
     expect(renderMessageView(view)).toContain('- part 2: "Invoice-10423.pdf" (application/pdf');
   });
@@ -237,7 +237,7 @@ describe('get_message', () => {
   it('marks inline images with their Content-ID', async () => {
     const view = await svc.getMessage({ mailbox: 'INBOX', uid: 8 });
     expect(view.message.attachments).toEqual([
-      { part: '2', filename: 'summit.png', content_type: 'image/png', size: expect.any(Number) as number, inline: true, content_id: '<summit-photo@example.com>' },
+      { part: '2', filename: 'summit.png', content_type: 'image/png', size: expect.any(Number) as number, encoding: 'base64', inline: true, content_id: '<summit-photo@example.com>' },
     ]);
     expect(view.message.bodyFormat).toBe('text/plain');
   });

@@ -13,7 +13,8 @@ import { MANIFEST_SCHEMAS, getMcpConfigForManifest, type McpbManifestAny, type M
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ATTACH_FROM_DIRS_FLAG, effectiveFeatures, loadConfig, type ConfigResult } from '../../src/config.js';
+import { ATTACH_FROM_DIRS_FLAG, SETTING_LABELS, effectiveFeatures, loadConfig, type ConfigResult } from '../../src/config.js';
+import { CONFIRM_SETTING_TITLE } from '../../src/safety/confirm.js';
 import { createLogger } from '../../src/log.js';
 import { PROMPT_NAMES } from '../../src/prompts.js';
 import { buildServer } from '../../src/server.js';
@@ -129,6 +130,13 @@ describe('manifest.json user_config', () => {
         'attach_from_dirs',
         'max_body_chars',
         'max_sends_per_hour',
+        'max_recipients_per_hour',
+        'max_recipients_per_day',
+        'sent_mailbox',
+        'trash_mailbox',
+        'drafts_mailbox',
+        'archive_mailbox',
+        'junk_mailbox',
       ].sort(),
     );
     expect(userConfig['icloud_email']).toMatchObject({ type: 'string', required: true });
@@ -144,6 +152,26 @@ describe('manifest.json user_config', () => {
     expect(userConfig['allow_permanent_delete']?.default).toBe(false);
     expect(userConfig['read_only']?.default).toBe(false);
     expect(userConfig['confirm_dialog']?.default).toBe(false);
+  });
+
+  // integ-7 / docs-8: error messages name the settings the user actually sees.
+  it('uses the manifest titles in error messages (SETTING_LABELS, CONFIRM_SETTING_TITLE)', () => {
+    const env = (manifest.server?.mcp_config?.env ?? {}) as Record<string, string>;
+    expect(SETTING_LABELS['MAIL_ATTACH_FROM_DIRS']).toBe(userConfig['attach_from_dirs']?.title);
+    for (const [envVar, label] of Object.entries(SETTING_LABELS)) {
+      if (envVar === 'MAIL_ATTACH_FROM_DIRS') continue; // passed as --attach-from-dirs arguments
+      const value = env[envVar];
+      expect(value, `${envVar} is mapped in the manifest`).toBeDefined();
+      const key = /\$\{user_config\.([a-z_]+)\}/.exec(value ?? '')?.[1] ?? '';
+      expect(userConfig[key]?.title, envVar).toBe(label);
+    }
+    expect(userConfig['confirm_dialog']?.title).toBe(CONFIRM_SETTING_TITLE);
+  });
+
+  // imap-1: special-folder overrides are available to extension users.
+  it('exposes the special-folder overrides', () => {
+    const env = (manifest.server?.mcp_config?.env ?? {}) as Record<string, string>;
+    for (const k of ['SENT', 'TRASH', 'DRAFTS', 'ARCHIVE', 'JUNK']) expect(env[`MAIL_${k}_MAILBOX`]).toMatch(/^\$\{user_config\.[a-z]+_mailbox\}$/);
   });
 
   it('maps every field to an env var the server reads, or to the --attach-from-dirs arguments', () => {

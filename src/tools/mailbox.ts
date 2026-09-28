@@ -43,7 +43,7 @@ export function registerMailboxTools(server: McpServer, rt: ToolRuntime): void {
     {
       title: markTitle,
       description:
-        'Change the read state and/or the flag of messages in one mailbox: read=true/false marks them read or unread; flagged=true/false flags or unflags them (unflagging also clears any colour); flag_color sets an Apple Mail flag colour and implies flagged. Give at least one of read, flagged or flag_color. Changes sync to Apple Mail through iCloud. Returns how many messages were changed, the flag state actually in effect afterwards for each message, anything that did not take effect, and UIDs that were not found. Up to 500 UIDs per call.',
+        'Change the read state and/or the flag of messages in one mailbox: read=true/false marks them read or unread; flagged=true/false flags or unflags them (unflagging also clears any colour); flag_color sets an Apple Mail flag colour and implies flagged. Give at least one of read, flagged or flag_color. Changes sync to Apple Mail through iCloud. Returns how many messages were changed, counts of the state in effect afterwards (and the per-message state for up to 20 messages), anything that did not take effect, and UIDs that were not found. Up to 500 UIDs per call.',
       inputSchema: z.strictObject({
         mailbox: mailboxField(),
         uids: uidsField(),
@@ -112,7 +112,7 @@ export function registerMailboxTools(server: McpServer, rt: ToolRuntime): void {
     {
       title: trashTitle,
       description:
-        'Move messages to Trash (iCloud\'s "Deleted Messages" folder). This is the normal, recoverable way to delete mail: the user can restore it from Trash, and iCloud empties Trash automatically after about 30 days. Messages that are already in Trash are refused (permanent deletion is a separate tool that may be disabled). Returns the number moved, the new UIDs in Trash when the server reports them, and UIDs that were not found. Up to 500 UIDs per call.',
+        'Move messages to Trash (iCloud\'s "Deleted Messages" folder). This is the normal, recoverable way to delete mail: the user can restore it from Trash until Trash is emptied (iCloud normally after about 30 days; Apple Mail\'s "Erase deleted messages" setting can do it sooner). Messages that are already in Trash are refused (permanent deletion is a separate tool that may be disabled). Returns the number moved, the new UIDs in Trash when the server reports them, and UIDs that were not found. Up to 500 UIDs per call.',
       inputSchema: z.strictObject({
         mailbox: mailboxField('Mailbox the messages are in'),
         uids: uidsField(),

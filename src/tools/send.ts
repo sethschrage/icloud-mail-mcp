@@ -27,7 +27,7 @@ import {
   type ToolRuntime,
 } from './common.js';
 
-export const SEND_TOOL_NAMES = ['send_email', 'reply_to_message', 'forward_message'] as const;
+export const SEND_TOOL_NAMES = ['send_email', 'reply_to_message', 'forward_message', 'send_draft'] as const;
 
 /** The mandatory warning at the start of every send tool description (SPEC §6.6). */
 function sendWarning(what: string, askedTo: string, draftAlternative: string): string {
@@ -39,7 +39,7 @@ function sendWarning(what: string, askedTo: string, draftAlternative: string): s
 }
 
 const SEND_FOOTER =
-  'A copy is saved to the Sent mailbox. Sending is limited per hour (MAIL_MAX_SENDS_PER_HOUR) and may require a click in a confirmation dialog on the Mac (MAIL_CONFIRM_DIALOG); if the user cancels there, the result says it was not sent.';
+  'A copy is saved to Sent. Sends and recipients are limited per hour and day, and a confirmation dialog on the Mac may need a click (if the user cancels there, the result says it was not sent).';
 
 export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
   const { service } = rt;
@@ -52,7 +52,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
       description: [
         sendWarning('EMAIL', 'send an email', 'save_draft'),
         'Composes and sends a new email. to/cc/bcc take "user@example.com" or "Name <user@example.com>" (Bcc recipients are hidden from the others). body is plain text; html is optional.',
-        'Attachments are local files inside the allowed folders (MAIL_ATTACH_FROM_DIRS, default Desktop, Documents and Downloads), at most 14 MB in total. from must be one of the account\'s allowed addresses (see get_account_info).',
+        'Attachments: local files inside the allowed attachment folders (see the attachments parameter). from must be one of the account\'s allowed addresses.',
         SEND_FOOTER,
         'Returns the Message-ID, accepted and rejected recipients, and whether the Sent copy was saved.',
       ].join(' '),
@@ -112,7 +112,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
       description: [
         sendWarning('REPLY', 'send a reply', 'save_draft with reply_to'),
         'Replies to the email identified by mailbox + uid. Recipients are filled in automatically: the original Reply-To or sender, and with reply_all also the original To and Cc, minus the user\'s own addresses; cc/bcc add more.',
-        'The subject gets "Re:", threading headers (In-Reply-To, References) are set, and the original text is quoted below body. The original is marked as answered.',
+        'The subject gets "Re:", threading headers (In-Reply-To, References) are set, and the original text is quoted below body. The original is marked as answered and read.',
         SEND_FOOTER,
       ].join(' '),
       inputSchema: z.strictObject({
@@ -171,8 +171,8 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
       title: forwardTitle,
       description: [
         sendWarning('FORWARD', 'forward the message', 'save_draft with forward_of'),
-        'Forwards the email identified by mailbox + uid to new recipients. body is an optional note placed above the forwarded message (which includes its From, Date, Subject, To and Cc).',
-        'The original\'s attachments are included by default (include_attachments=false leaves them out; at most 14 MB). The subject gets "Fwd:" and the original is marked as forwarded.',
+        'Forwards the email identified by mailbox + uid to new recipients. body is an optional note placed above the forwarded message (which includes its From, Date, Subject, To and Cc); an HTML original is forwarded as HTML too.',
+        'The original\'s attachments are included by default (include_attachments=false leaves them out; at most 14 MB). The subject gets "Fwd:" and the original is marked as forwarded and read.',
         SEND_FOOTER,
       ].join(' '),
       inputSchema: z.strictObject({
@@ -218,6 +218,36 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
             include_attachments: args.include_attachments,
           }),
         },
+      ),
+  );
+
+  const draftTitle = 'Send Draft';
+  server.registerTool(
+    'send_draft',
+    {
+      title: draftTitle,
+      description: [
+        "SENDS A REAL EMAIL IMMEDIATELY from the user's iCloud account; it cannot be recalled. Only call this when the user has explicitly asked to send this draft, and make sure it is the right draft (recipients, subject, content). If unsure, leave it in Drafts: the user can send it from Apple Mail.",
+        'Sends a draft from the Drafts folder exactly as it is saved there, including any edits the user made in Apple Mail, with its recipients, subject, attachments and threading headers. Use it after save_draft when the user says the draft can go out, instead of recomposing the message.',
+        'Take uid from save_draft\'s result or from search_messages on the Drafts mailbox. Bcc recipients are sent but hidden; the draft is then removed from Drafts (deleted once the Sent copy is saved, otherwise moved to Trash).',
+        SEND_FOOTER,
+      ].join(' '),
+      inputSchema: z.strictObject({
+        uid: uidField().describe('UID of the draft in the Drafts mailbox (from save_draft or search_messages with mailbox "drafts").'),
+      }),
+      annotations: annotations(draftTitle, SEND_HINTS),
+      _meta: { ...REQUIRES_USER_INTERACTION_META },
+    },
+    (args, ctx) =>
+      runTool(
+        rt,
+        'send_draft',
+        ctx,
+        async (signal) => {
+          const result = await service.sendDraft({ uid: args.uid }, { signal });
+          return textResult(renderJson(result));
+        },
+        { timeoutMs: confirmAwareTimeoutMs(rt), audit: () => ({ draft: { mailbox: 'drafts', uid: args.uid } }) },
       ),
   );
 }

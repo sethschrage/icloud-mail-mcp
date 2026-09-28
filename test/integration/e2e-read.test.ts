@@ -245,7 +245,7 @@ describe('download_attachment', () => {
     const meta = leadingJson<{ filename: string; content_type: string }>(r.text);
     expect(meta).toMatchObject({ filename: 'notes.txt', content_type: 'text/plain' });
     expect(r.text).toContain(UNTRUSTED_BEGIN);
-    expect(r.text.trimEnd().endsWith(UNTRUSTED_END)).toBe(true);
+    expect(r.text.trimEnd().split('\n').at(-1)?.startsWith(UNTRUSTED_END)).toBe(true);
   });
 
   it('returns a small image as an image block', async () => {

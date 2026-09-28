@@ -1,7 +1,10 @@
 import type { ListResponse } from 'imapflow';
 import { describe, expect, it } from 'vitest';
 import { MailError } from '../../src/errors.js';
+import type { Config } from '../../src/config.js';
+import type { ImapManager } from '../../src/imap/client.js';
 import {
+  MailboxRegistry,
   computeSpecialMap,
   isNotesMailbox,
   labelSpecials,
@@ -33,11 +36,15 @@ function entry(path: string, opts: { flags?: string[]; specialUse?: string; sour
   return e;
 }
 
-/** iCloud-like listing: no SPECIAL-USE attributes, imapflow name matching fills specialUse. */
+/**
+ * iCloud-like listing: no SPECIAL-USE attributes, so imapflow guesses specialUse from names. When
+ * several folders match one type it gives it to the alphabetically first path only: the
+ * client-created "Sent" gets \\Sent and Apple's "Sent Messages" gets nothing (what imapflow 2.1 does).
+ */
 function icloudLike(): MailboxInfo[] {
   return [
     entry('INBOX', { flags: ['\\NoInferiors'], specialUse: '\\Inbox', messages: 10, unseen: 2 }),
-    entry('Sent Messages', { specialUse: '\\Sent', source: 'name' }),
+    entry('Sent Messages'),
     entry('Deleted Messages', { specialUse: '\\Trash', source: 'name' }),
     entry('Drafts', { specialUse: '\\Drafts', source: 'name' }),
     entry('Junk', { specialUse: '\\Junk', source: 'name' }),
@@ -47,7 +54,7 @@ function icloudLike(): MailboxInfo[] {
     entry('Work', { flags: ['\\Noselect', '\\HasChildren'] }),
     entry('Work/Reports'),
     entry('Personal/Reports'),
-    entry('Sent'), // a client-created duplicate
+    entry('Sent', { specialUse: '\\Sent', source: 'name' }), // a client-created duplicate
   ].map(toMailboxInfo);
 }
 
@@ -76,6 +83,46 @@ describe('special folders', () => {
       junk: 'Junk',
       archive: 'Archive',
     });
+  });
+
+  // imap-1 / tests-1: a name guess never beats Apple's own top-level folder names.
+  it('prefers Apple\'s folder names over imapflow name guesses for stray folders', () => {
+    const list = [
+      entry('INBOX'),
+      entry('Sent Items', { specialUse: '\\Sent', source: 'name' }),
+      entry('Sent Messages'),
+      entry('Bin', { specialUse: '\\Trash', source: 'name' }),
+      entry('Deleted Messages'),
+      entry('Draft', { specialUse: '\\Drafts', source: 'name' }),
+      entry('Drafts'),
+      entry('Bulk Mail', { specialUse: '\\Junk', source: 'name' }),
+      entry('Junk'),
+    ].map(toMailboxInfo);
+    const { map } = computeSpecialMap(list, {});
+    expect(map.sent?.path).toBe('Sent Messages');
+    expect(map.trash?.path).toBe('Deleted Messages');
+    expect(map.drafts?.path).toBe('Drafts');
+    expect(map.junk?.path).toBe('Junk');
+    expect(list.find((m) => m.path === 'Sent Items')?.serverSpecialUseSource).toBe('name');
+  });
+
+  it('trusts a real SPECIAL-USE attribute, ignores nested name guesses, and uses one folder for one kind only', () => {
+    const list = [
+      entry('INBOX'),
+      entry('Gesendet', { specialUse: '\\Sent', source: 'extension' }),
+      entry('Sent Messages'),
+      entry('Old Mail', { flags: ['\\HasChildren'] }),
+      entry('Old Mail/Trash', { specialUse: '\\Trash', source: 'name' }),
+      entry('Sent Items', { specialUse: '\\Sent', source: 'name' }),
+    ].map(toMailboxInfo);
+    const { map } = computeSpecialMap(list, {});
+    expect(map.sent?.path).toBe('Gesendet');
+    expect(map.trash).toBeNull();
+    const guessOnly = computeSpecialMap([entry('INBOX'), entry('Sent Items', { specialUse: '\\Sent', source: 'name' })].map(toMailboxInfo), {});
+    expect(guessOnly.map.sent?.path).toBe('Sent Items');
+    const both = computeSpecialMap([entry('INBOX'), entry('Archive')].map(toMailboxInfo), { sent: 'Archive' });
+    expect(both.map.sent?.path).toBe('Archive');
+    expect(both.map.archive).toBeNull();
   });
 
   it('falls back to iCloud default names when special-use is missing', () => {
@@ -172,5 +219,69 @@ describe('listing helpers', () => {
     const sorted = sortMailboxesForDisplay(labelSpecials(list, map)).map((m) => m.path);
     expect(sorted.slice(0, 6)).toEqual(['INBOX', 'Drafts', 'Sent Messages', 'Archive', 'Junk', 'Deleted Messages']);
     expect(sorted.slice(6)).toEqual(['México', 'Notes', 'Personal/Reports', 'Sent', 'Work', 'Work/Reports']);
+  });
+});
+
+// imap-8 / imap-5: the registry's two caches and refresh generations.
+describe('MailboxRegistry', () => {
+  function registryWith(listImpl: (opts?: { statusQuery?: unknown }) => Promise<ListResponse[]>) {
+    const calls: Array<{ status: boolean }> = [];
+    const imap = {
+      onMailboxMissing: undefined as undefined | (() => void),
+      run: <T>(fn: (c: unknown) => Promise<T>) =>
+        fn({
+          list: (opts?: { statusQuery?: unknown }) => {
+            calls.push({ status: !!opts?.statusQuery });
+            return listImpl(opts);
+          },
+        }),
+    };
+    const config = { mailboxOverrides: {} } as unknown as Config;
+    return { reg: new MailboxRegistry(imap as unknown as ImapManager, config), calls, imap };
+  }
+
+  it('a refresh never returns a load that started before the change', async () => {
+    let folders = ['INBOX', 'Drafts'];
+    let releaseFirst: (() => void) | undefined;
+    let n = 0;
+    const { reg } = registryWith(async () => {
+      const snapshot = folders.map((f) => entry(f));
+      if (n++ === 0) await new Promise<void>((r) => (releaseFirst = r));
+      return snapshot;
+    });
+    const first = reg.list();
+    await new Promise((r) => setTimeout(r, 10));
+    folders = ['INBOX', 'Drafts', 'Created Just Now'];
+    const refreshed = reg.list({ refresh: true });
+    releaseFirst?.();
+    expect((await refreshed).map((m) => m.path)).toContain('Created Just Now');
+    expect((await first).map((m) => m.path)).not.toContain('Created Just Now');
+    // The stale load was not cached either.
+    expect((await reg.list()).map((m) => m.path)).toContain('Created Just Now');
+  });
+
+  it('loads names without STATUS; counts only on request, and invalidateCounts keeps the names', async () => {
+    const { reg, calls } = registryWith(async (opts) => ['INBOX', 'Drafts'].map((f) => entry(f, opts?.statusQuery ? { messages: 5, unseen: 1 } : {})));
+    const names = await reg.list();
+    expect(names.every((m) => m.total === null || m.total === 0 || m.total === undefined || typeof m.total === 'number')).toBe(true);
+    expect(calls).toEqual([{ status: false }]);
+    await reg.resolve('drafts');
+    expect(calls).toHaveLength(1);
+    const withCounts = await reg.list({ counts: true });
+    expect(withCounts.find((m) => m.path === 'INBOX')).toMatchObject({ total: 5, unread: 1 });
+    expect(calls).toEqual([{ status: false }, { status: true }]);
+    reg.invalidateCounts();
+    await reg.resolve('inbox');
+    expect(calls).toHaveLength(2);
+    await reg.list({ counts: true });
+    expect(calls).toHaveLength(3);
+  });
+
+  it('drops the folder list when a mailbox turned out to be missing', async () => {
+    const { reg, calls, imap } = registryWith(async () => [entry('INBOX')]);
+    await reg.list();
+    imap.onMailboxMissing?.();
+    await reg.list();
+    expect(calls).toHaveLength(2);
   });
 });

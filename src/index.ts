@@ -12,6 +12,7 @@
  */
 import { format } from 'node:util';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { killChildProcesses } from './credentials.js';
 import { errorMessage } from './errors.js';
 import { log, redact } from './log.js';
 import { buildServer } from './server.js';
@@ -68,6 +69,8 @@ function main(): void {
     log.info('shutting down', { reason });
     const force = setTimeout(() => process.exit(0), FORCE_EXIT_MS);
     force.unref();
+    // A confirmation dialog still on screen would outlive the process and its answer would be lost.
+    killChildProcesses();
     try {
       await handle.close();
     } catch (err) {

@@ -13,6 +13,7 @@ import {
   createTestService,
   makeTestDirs,
   portOpen,
+  skipProfile,
   rawFlags,
   rawSetDeleted,
   rawStatus,
@@ -37,7 +38,7 @@ async function expectMailError(p: Promise<unknown>, code: string, pattern?: RegE
   return err as MailError;
 }
 
-describe.skipIf(!icloudUp)('icloud profile (no MOVE, no SPECIAL-USE)', () => {
+describe.skipIf(skipProfile(icloudUp))('icloud profile (no MOVE, no SPECIAL-USE)', () => {
   const port = PROFILES.icloud;
   let dirs: TestDirs;
   let svc: MailService;
@@ -102,7 +103,7 @@ describe.skipIf(!icloudUp)('icloud profile (no MOVE, no SPECIAL-USE)', () => {
   });
 });
 
-describe.skipIf(!noUidplusUp)('no-uidplus profile (expunge guard)', () => {
+describe.skipIf(skipProfile(noUidplusUp))('no-uidplus profile (expunge guard)', () => {
   const port = PROFILES['no-uidplus'];
   let dirs: TestDirs;
   let svc: MailService;
@@ -138,11 +139,11 @@ describe.skipIf(!noUidplusUp)('no-uidplus profile (expunge guard)', () => {
 
   it('guards permanent delete and draft replacement too', async () => {
     await rawSetDeleted('Deleted Messages', 1, true, port);
-    await svc.trashMessages({ mailbox: 'INBOX', uids: [4] }).catch(() => undefined);
+    const trashed = await svc.trashMessages({ mailbox: 'INBOX', uids: [4] });
+    expect(trashed.moved).toBe(1);
     const trashUids = (await svc.search({ mailbox: 'trash', limit: 10 })).messages.map((m) => m.uid);
-    if (trashUids[0] !== undefined) {
-      await expectMailError(svc.deleteMessagesPermanently({ mailbox: 'trash', uids: [trashUids[0]] }), 'EXPUNGE_GUARD');
-    }
+    expect(trashUids.length).toBeGreaterThan(0);
+    await expectMailError(svc.deleteMessagesPermanently({ mailbox: 'trash', uids: [trashUids[0] as number] }), 'EXPUNGE_GUARD');
     await rawSetDeleted('Drafts', 2, true, port);
     const before = await rawStatus('Drafts', port);
     await expectMailError(svc.saveDraft({ body: 'v2', replaceDraftUid: 1 }), 'EXPUNGE_GUARD', /replace the draft/);
@@ -150,6 +151,8 @@ describe.skipIf(!noUidplusUp)('no-uidplus profile (expunge guard)', () => {
     await rawSetDeleted('Drafts', 2, false, port);
     const ok = await svc.saveDraft({ body: 'v2', replaceDraftUid: 1 });
     expect(ok.replaced_uid).toBe(1);
+    // drafts-1: a draft this process did not save goes to Trash, never expunged.
+    expect(ok.old_draft).toMatch(/moved to Deleted Messages/);
     expect(await rawFlags('Drafts', 1, port)).toBeNull();
     expect(await rawFlags('Drafts', 2, port)).not.toBeNull();
   });

@@ -10,11 +10,19 @@
  *   icloud.com/me.com/mac.com addresses one retry with the local part. The working login is kept
  *   for the process lifetime.
  * - imapflow never gets its default (stdout) logger.
+ * - A tool call that is abandoned (deadline or client cancellation, see context.ts) while one of
+ *   its IMAP commands is still pending closes that connection: imapflow then rejects the pending
+ *   command and drops its mailbox lock, and the next call reconnects instead of waiting minutes
+ *   behind a command that will never finish (a half-open socket after a network change, or a
+ *   SEARCH iCloud never answers). A mailbox lock wait that times out is treated the same way.
+ * - Without implicit TLS (IMAP_SECURE=false) STARTTLS is required, so a network attacker cannot
+ *   strip it and read the app-specific password; IMAP_ALLOW_PLAINTEXT=true (tests only) relaxes it.
  */
 import { readFileSync } from 'node:fs';
 import tls from 'node:tls';
 import { ImapFlow, type ImapFlowOptions, type MailboxObject } from 'imapflow';
 import type { Config } from '../config.js';
+import { currentContext } from '../context.js';
 import { APP_PASSWORD_HELP, type CredentialProvider } from '../credentials.js';
 import { MailError, errorMessage } from '../errors.js';
 import { imapflowLogger, log as defaultLogger, redact, type Logger } from '../log.js';
@@ -36,20 +44,67 @@ export function imapLoginCandidates(email: string, override: string | undefined)
   return candidates;
 }
 
-export function authFailureMessage(service: 'IMAP' | 'SMTP', host: string, users: readonly string[]): string {
+export function authFailureMessage(service: 'IMAP' | 'SMTP', host: string, users: readonly string[], serverSaid?: string): string {
   const who = users.length ? users.map((u) => `"${u}"`).join(' and ') : 'the configured account';
+  const customDomain =
+    'custom-domain users: enter your primary @icloud.com address as "iCloud email address" in the extension settings and your custom address as "From address (optional)" (manual setups: ICLOUD_EMAIL / MAIL_FROM_ADDRESS)';
   const loginHint =
     service === 'IMAP'
-      ? '(3) the IMAP login may need to be the part of your address before "@" or your primary @icloud.com address: custom-domain users must log in with their @icloud.com address (set ICLOUD_IMAP_USER);'
-      : '(3) SMTP needs your full iCloud email address as the login (custom-domain users: your primary @icloud.com address; set ICLOUD_SMTP_USER);';
+      ? `(3) the login must be your iCloud Mail address (or the part before "@"), not an Apple Account sign-in email from another provider such as Gmail; ${customDomain}; a different IMAP login can also be set as "IMAP login (optional)" (ICLOUD_IMAP_USER);`
+      : `(3) SMTP needs your full iCloud Mail address as the login; ${customDomain}; a manual setup can also set ICLOUD_SMTP_USER;`;
+  const nonIcloud = users.find((u) => u.includes('@') && !(ICLOUD_DOMAINS as readonly string[]).includes(domainOf(u)));
+  const appleIdHint = nonIcloud
+    ? ` Note: "${nonIcloud}" is not an @icloud.com, @me.com or @mac.com address. Your Apple Account email is not necessarily your iCloud Mail address: use your @icloud.com address.`
+    : '';
   return (
-    `iCloud ${service} (${host}) rejected the login for ${who}. Likely causes: ` +
+    `iCloud ${service} (${host}) rejected the login for ${who}${serverSaid ? ` (server said: ${serverSaid})` : ''}. Likely causes: ` +
     '(1) your regular Apple Account password was used instead of an app-specific password; ' +
     '(2) the app-specific password was revoked, which happens automatically when the Apple Account password is changed, so create a new one; ' +
     `${loginHint} ` +
-    '(4) app-specific passwords require two-factor authentication on the Apple Account. ' +
+    '(4) app-specific passwords require two-factor authentication on the Apple Account.' +
+    `${appleIdHint} ` +
     APP_PASSWORD_HELP
   );
+}
+
+/** IMAP response codes (RFC 5530) that refuse a login for a reason other than the credentials. */
+const TRANSIENT_LOGIN_CODES = new Set(['UNAVAILABLE', 'LIMIT', 'INUSE', 'SERVERBUG', 'CONTACTADMIN', 'ALERT', 'OVERQUOTA']);
+const CREDENTIAL_CODES = new Set(['AUTHENTICATIONFAILED', 'AUTHORIZATIONFAILED', 'EXPIRED']);
+
+function responseCodeOf(err: unknown): string | undefined {
+  const c = (err as ImapErrorLike | null)?.serverResponseCode;
+  return typeof c === 'string' && c ? c.toUpperCase() : undefined;
+}
+
+/** The server's human-readable text for a failed command (redacted, single line, capped). */
+export function serverTextOf(err: unknown): string | undefined {
+  const e = (err ?? {}) as ImapErrorLike;
+  let raw = typeof e.responseText === 'string' && e.responseText ? e.responseText : typeof e.response === 'string' && e.response ? e.response : undefined;
+  if (!raw) return undefined;
+  // err.response is the whole tagged line ("2 NO [UNAVAILABLE] …"): drop the tag and status.
+  raw = raw.replace(/^\s*\S+\s+(?:NO|BAD|BYE)\s+/i, '');
+  const code = responseCodeOf(err);
+  if (code && !raw.toUpperCase().includes(`[${code}`)) raw = `[${code}] ${raw}`;
+  return redact(raw).replace(/\s+/g, ' ').trim().slice(0, 300) || undefined;
+}
+
+/**
+ * True when a refused LOGIN/AUTHENTICATE means the credentials are wrong. imapflow sets
+ * `authenticationFailed` on every tagged NO to LOGIN, whatever the reason, so the RFC 5530 response
+ * code decides: UNAVAILABLE, LIMIT (too many connections), INUSE, … are not credential problems.
+ */
+export function isCredentialFailure(err: unknown): boolean {
+  const e = (err ?? {}) as ImapErrorLike;
+  const code = responseCodeOf(err);
+  if (code && CREDENTIAL_CODES.has(code)) return true;
+  if (e.authenticationFailed !== true) return false;
+  return !code || !TRANSIENT_LOGIN_CODES.has(code);
+}
+
+/** A refused login that is not about the credentials (e.g. too many connections). */
+export function isTransientLoginRefusal(err: unknown): boolean {
+  const code = responseCodeOf(err);
+  return (err as ImapErrorLike | null)?.authenticationFailed === true && !!code && TRANSIENT_LOGIN_CODES.has(code);
 }
 
 const TLS_ERROR_CODES = new Set([
@@ -87,6 +142,7 @@ const CONNECTION_ERROR_CODES = new Set([
 
 interface ImapErrorLike {
   code?: unknown;
+  response?: unknown;
   authenticationFailed?: unknown;
   tlsFailed?: unknown;
   responseStatus?: unknown;
@@ -116,8 +172,16 @@ export function mapImapError(err: unknown, ctx: { host: string; port: number; us
   const e = (err ?? {}) as ImapErrorLike;
   const code = errorCode(err);
   const where = `${ctx.host}:${ctx.port}`;
-  if (e.authenticationFailed === true || e.serverResponseCode === 'AUTHENTICATIONFAILED') {
-    return new MailError('AUTH', authFailureMessage('IMAP', where, ctx.users ?? []), { cause: err });
+  if (isTransientLoginRefusal(err)) {
+    const said = serverTextOf(err);
+    return new MailError(
+      'CONNECTION',
+      `iCloud IMAP (${where}) refused the login for now${said ? ` (server said: ${said})` : ''}. This is usually temporary, for example too many open connections from Apple Mail on your Mac, iPhone and iPad; your password was not necessarily wrong. Try again in a few minutes.`,
+      { cause: err },
+    );
+  }
+  if (isCredentialFailure(err)) {
+    return new MailError('AUTH', authFailureMessage('IMAP', where, ctx.users ?? [], serverTextOf(err)), { cause: err });
   }
   if (e.tlsFailed === true || (code && TLS_ERROR_CODES.has(code))) {
     return new MailError(
@@ -131,7 +195,7 @@ export function mapImapError(err: unknown, ctx: { host: string; port: number; us
     return new MailError('CONNECTION', `iCloud is throttling IMAP requests${secs ? `; try again in about ${secs} s` : '; try again in a minute'}.`, { cause: err });
   }
   if (code === 'LockTimeout') {
-    return new MailError('CONNECTION', 'Timed out waiting for another mail operation on this connection to finish. Try again.', { cause: err });
+    return new MailError('CONNECTION', 'Timed out waiting for another mail operation on this connection to finish; the connection was reset. Try again.', { cause: err });
   }
   if (code && CONNECTION_ERROR_CODES.has(code)) {
     return new MailError(
@@ -145,6 +209,17 @@ export function mapImapError(err: unknown, ctx: { host: string; port: number; us
     return new MailError('SERVER', `The IMAP server refused the request: ${redact(text)}`, { cause: err });
   }
   return new MailError('INTERNAL', `IMAP error: ${redact(errorMessage(err))}`, { cause: err });
+}
+
+/** The error to throw for an aborted call: the deadline/cancellation MailError, or CANCELLED. */
+export function abortError(signal: AbortSignal): MailError {
+  const reason: unknown = signal.reason;
+  if (reason instanceof MailError) return reason;
+  return new MailError('CANCELLED', 'The request was cancelled or timed out; nothing more was done.');
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw abortError(signal);
 }
 
 export interface ImapManagerOptions {
@@ -166,6 +241,8 @@ export interface WithMailboxOptions {
 }
 
 export class ImapManager {
+  /** Called when a mailbox turned out not to exist any more (the registry drops its folder list). */
+  onMailboxMissing: (() => void) | undefined;
   private client: ImapFlow | null = null;
   private connecting: Promise<ImapFlow> | null = null;
   private loginUser: string | null = null;
@@ -228,8 +305,8 @@ export class ImapManager {
   }
 
   private buildClient(user: string, pass: string): ImapFlow {
-    const { host, port, secure } = this.config.imap;
-    const client = this.createClient({
+    const { host, port, secure, allowPlaintext } = this.config.imap;
+    const options: ImapFlowOptions = {
       host,
       port,
       secure,
@@ -243,7 +320,16 @@ export class ImapManager {
       socketTimeout: 5 * 60_000,
       tls: this.tlsOptions(),
       maxLockHoldTime: 90_000,
-    });
+      // No ENABLE CONDSTORE / UTF8=ACCEPT after login: nothing here needs them, and iCloud's
+      // CONDSTORE/ENABLE handling is known to be buggy (SPEC hard rule 3: rely only on the basics).
+      // Mailbox names then use modified UTF-7, which imapflow encodes and decodes transparently.
+      disableAutoEnable: true,
+      qresync: false,
+    };
+    // Without implicit TLS, require STARTTLS: opportunistic STARTTLS would silently fall back to a
+    // plaintext LOGIN when a network attacker strips it from CAPABILITY.
+    if (!secure && !allowPlaintext) options.doSTARTTLS = true;
+    const client = this.createClient(options);
     client.on('error', (err: Error) => {
       this.logger.warn('IMAP connection error', { code: errorCode(err), err: redact(errorMessage(err)) });
       if (this.client === client) this.client = null;
@@ -274,7 +360,7 @@ export class ImapManager {
         } catch {
           // already closed
         }
-        const authFailed = (err as ImapErrorLike | null)?.authenticationFailed === true;
+        const authFailed = isCredentialFailure(err);
         if (authFailed && i < candidates.length - 1) {
           this.logger.info('IMAP login failed; retrying with the next login form', { next: candidates[i + 1] });
           continue;
@@ -364,14 +450,45 @@ export class ImapManager {
     }
   }
 
+  /**
+   * Close `client` and forget it, so pending commands reject (NoConnection), its mailbox lock is
+   * dropped and the next operation reconnects.
+   */
+  private abandon(client: ImapFlow, reason: string): void {
+    if (this.client === client) this.client = null;
+    this.logger.info('closing the IMAP connection', { reason });
+    try {
+      client.close();
+    } catch {
+      // already closed
+    }
+  }
+
   private async attempt<T>(fn: (client: ImapFlow) => Promise<T>, retry: boolean): Promise<T> {
     const ctx = { host: this.config.imap.host, port: this.config.imap.port, users: this.plannedLogins };
+    const signal = currentContext()?.signal;
     for (let attemptNo = 0; ; attemptNo++) {
+      throwIfAborted(signal);
       const client = await this.connection();
+      throwIfAborted(signal);
+      // The call was abandoned while this command is still pending: nothing will ever read its
+      // result, and a stuck command would block the one connection for everyone else.
+      const onAbort = (): void => this.abandon(client, 'the tool call was abandoned (deadline or cancellation) while an IMAP command was pending');
+      signal?.addEventListener('abort', onAbort, { once: true });
       try {
         return await fn(client);
       } catch (err) {
+        // Never retry work for an abandoned call (a read would silently re-run the stuck command).
+        if (signal?.aborted) throw abortError(signal);
         if (err instanceof MailError) throw err;
+        if (errorCode(err) === 'LockTimeout') {
+          // Operations are serialised and each holds at most one lock, so a lock wait this long
+          // means the holder is stuck: reset the connection. Nothing of this operation ran yet
+          // (it never got the lock), so one retry on a fresh connection is safe even for writes.
+          this.abandon(client, 'a mailbox lock wait timed out');
+          if (attemptNo === 0) continue;
+          throw mapImapError(err, ctx);
+        }
         const dead = !client.usable || isConnectionError(err);
         if (dead && this.client === client) this.client = null;
         if (dead && retry && attemptNo === 0) {
@@ -379,6 +496,8 @@ export class ImapManager {
           continue;
         }
         throw mapImapError(err, ctx);
+      } finally {
+        signal?.removeEventListener('abort', onAbort);
       }
     }
   }
@@ -391,6 +510,11 @@ export class ImapManager {
     } finally {
       this.end();
     }
+  }
+
+  /** The current call's abort signal, for callers that check it between commands. */
+  get signal(): AbortSignal | undefined {
+    return currentContext()?.signal;
   }
 
   /**
@@ -406,11 +530,14 @@ export class ImapManager {
           lock = await client.getMailboxLock(path, { readOnly: opts.readOnly, acquireTimeout: this.lockTimeoutMs, description: `mcp:${path}` });
         } catch (err) {
           if ((err as { mailboxMissing?: unknown }).mailboxMissing === true) {
+            this.onMailboxMissing?.();
             throw new MailError('NOT_FOUND', `Mailbox "${path}" does not exist on the server (it may have been renamed or deleted). Call list_mailboxes to see the current folders.`);
           }
           throw err;
         }
         try {
+          // The call may have been abandoned while waiting for the lock: start nothing new.
+          throwIfAborted(currentContext()?.signal);
           const mailbox = client.mailbox;
           if (!mailbox) throw new MailError('INTERNAL', `Mailbox "${path}" could not be opened.`);
           return await fn(client, mailbox);

@@ -33,16 +33,16 @@ export function registerDraftTools(server: McpServer, rt: ToolRuntime): void {
         "Save an email as a draft in the iCloud Drafts folder WITHOUT sending it. It appears in Apple Mail's Drafts, where the user can review, edit and send it. Prefer this over the send tools whenever the user has not explicitly asked to send.",
         'For a reply draft pass reply_to {mailbox, uid, reply_all}: recipients, "Re:" subject, quoted original and threading headers are filled in (to/cc add extra recipients).',
         'For a forward draft pass forward_of {mailbox, uid, include_attachments}: "Fwd:" subject, the forwarded message and by default its attachments are included; give the recipients in to.',
-        'To revise a draft saved earlier, pass its uid in Drafts as replace_draft_uid: the new version is saved first, then the old one is removed.',
-        'body is plain text; html is optional. Attachments are local files inside the allowed folders (MAIL_ATTACH_FROM_DIRS, default Desktop, Documents and Downloads), at most 14 MB in total.',
-        'Returns the draft\'s mailbox, uid and Message-ID.',
+        'To revise a draft saved earlier, pass its uid in Drafts as replace_draft_uid: from, to, cc, bcc, subject, threading headers and attachments you leave out are kept from the old draft (pass a field, even an empty list, to change it; keep_attachments=false drops the old attachments); body replaces the old body entirely. The new version is saved first; the old one is then deleted if Claude saved it in this session, otherwise moved to Trash (recoverable).',
+        'body is plain text; html is optional. Attachments are local files inside the allowed attachment folders (see the attachments parameter); note that Claude can read files it attaches, even when sending is switched off.',
+        'Returns the draft\'s mailbox, uid, Message-ID and what was saved (from, to, cc, bcc, subject, attachment names), so it can be shown to the user. To send a saved draft later, use send_draft (when sending is enabled).',
       ].join(' '),
       inputSchema: z.strictObject({
         to: addressListField('To recipients (optional for a draft)').optional(),
         cc: addressListField('Cc recipients').optional(),
         bcc: addressListField('Bcc recipients (kept in the draft; not visible to other recipients once sent)').optional(),
         subject: z.string().max(2000).describe('Subject line. For reply/forward drafts it defaults to "Re: …" / "Fwd: …" of the original.').optional(),
-        body: bodyField('Plain-text body of the draft (for reply/forward drafts: your text; the original is quoted below it).'),
+        body: bodyField('Plain-text body of the draft (for reply/forward drafts: your text; the original is quoted below it). With replace_draft_uid it replaces the old body entirely.'),
         html: htmlField().optional(),
         attachments: attachmentsField().optional(),
         from: fromField().optional(),
@@ -67,7 +67,11 @@ export function registerDraftTools(server: McpServer, rt: ToolRuntime): void {
           .int()
           .min(1)
           .max(4_294_967_295)
-          .describe('UID (in Drafts) of an earlier draft to replace with this version. Only a message marked as a draft is removed.')
+          .describe('UID (in Drafts) of an earlier draft to replace with this version; fields you leave out are kept from it. Only a message marked as a draft is replaced.')
+          .optional(),
+        keep_attachments: z
+          .boolean()
+          .describe("With replace_draft_uid and no attachments given: keep the old draft's attachments (default true).")
           .optional(),
       }),
       annotations: annotations(title, WRITE_NON_IDEMPOTENT_HINTS),
@@ -91,6 +95,7 @@ export function registerDraftTools(server: McpServer, rt: ToolRuntime): void {
               replyTo: args.reply_to ? { mailbox: args.reply_to.mailbox, uid: args.reply_to.uid, replyAll: args.reply_to.reply_all } : undefined,
               forwardOf: args.forward_of ? { mailbox: args.forward_of.mailbox, uid: args.forward_of.uid, includeAttachments: args.forward_of.include_attachments } : undefined,
               replaceDraftUid: args.replace_draft_uid,
+              keepAttachments: args.keep_attachments,
             },
             { signal },
           );

@@ -97,7 +97,7 @@ export const fromField = (): z.ZodString =>
     .min(1)
     .max(998)
     .describe(
-      'From address. Must be one of the account\'s allowed addresses (the iCloud address, the configured default, or MAIL_ALLOWED_FROM; see get_account_info). Omit to use the default (for replies: the address the original was sent to).',
+      'From address. Must be one of the account\'s allowed addresses (the iCloud address, the "From address (optional)" and "Other From addresses (optional)" settings; see get_account_info from.allowed). Omit to use the default (for replies and forwards: the allowed address the original came from or was sent to).',
     );
 
 export const bodyField = (what: string): z.ZodString => z.string().max(2_000_000).describe(what);
@@ -113,7 +113,7 @@ export const attachmentsField = (): z.ZodArray<z.ZodString> =>
     .array(z.string().min(1).max(4096))
     .max(50)
     .describe(
-      'Local files to attach, as absolute paths or paths starting with "~/". They must be inside the folders allowed by MAIL_ATTACH_FROM_DIRS (default: Desktop, Documents, Downloads); hidden files and folders are refused. At most 14 MB in total.',
+      'Local files to attach, as absolute paths or paths starting with "~/". They must be inside the allowed attachment folders ("Attach files from" in the extension settings; get_account_info lists them as attach_from_dirs; default Desktop, Documents, Downloads); hidden files and folders are refused. At most 14 MB in total.',
     );
 
 // ---------------------------------------------------------------------------------------------

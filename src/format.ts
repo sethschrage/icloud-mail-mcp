@@ -126,6 +126,16 @@ export function compareCalendarDates(a: CalendarDate, b: CalendarDate): number {
   return a.year - b.year || a.month - b.month || a.day - b.day;
 }
 
+/**
+ * Epoch ms of local midnight at the start of `date` in `timeZone` (DST-aware: the offset is
+ * re-evaluated at the candidate instant).
+ */
+export function zonedMidnight(date: CalendarDate, timeZone: string): number {
+  const guess = Date.UTC(date.year, date.month - 1, date.day);
+  const first = guess - zonedParts(new Date(guess), timeZone).offsetMinutes * 60_000;
+  return guess - zonedParts(new Date(first), timeZone).offsetMinutes * 60_000;
+}
+
 /** UTC midnight of a calendar date: imapflow formats this back to exactly that date for SINCE/BEFORE. */
 export function calendarDateToUTC(date: CalendarDate): Date {
   return new Date(Date.UTC(date.year, date.month - 1, date.day));
@@ -211,13 +221,19 @@ export function normalizeNewlines(text: string): string {
 // ---------------------------------------------------------------------------------------------
 
 export const HTML_TO_TEXT_MAX_INPUT = 4_000_000;
+/**
+ * html-to-text recurses per nesting level: a few thousand nested elements (a hostile or broken
+ * email) overflow the stack. Deeper content is flattened by the cheap stripper instead.
+ */
+export const HTML_TO_TEXT_MAX_DEPTH = 200;
+export const HTML_TO_TEXT_MAX_CHILD_NODES = 10_000;
 
 let htmlConverter: ((html: string) => string) | undefined;
 
 /** html-to-text settings (SPEC §5). Compiled lazily so a library problem can never break startup. */
 export const HTML_TO_TEXT_OPTIONS = {
   wordwrap: false,
-  limits: { maxInputLength: HTML_TO_TEXT_MAX_INPUT },
+  limits: { maxInputLength: HTML_TO_TEXT_MAX_INPUT, maxDepth: HTML_TO_TEXT_MAX_DEPTH, maxChildNodes: HTML_TO_TEXT_MAX_CHILD_NODES },
   selectors: [
     { selector: 'img', format: 'skip' },
     { selector: 'a', options: { hideLinkHrefIfSameAsText: true, linkBrackets: [' <', '>'] } },
@@ -231,13 +247,42 @@ export const HTML_TO_TEXT_OPTIONS = {
   ],
 } satisfies Parameters<typeof compile>[0];
 
-export function htmlToPlainText(html: string): string {
-  const input = html.length > HTML_TO_TEXT_MAX_INPUT ? html.slice(0, HTML_TO_TEXT_MAX_INPUT) : html;
-  htmlConverter ??= compile(HTML_TO_TEXT_OPTIONS);
-  return htmlConverter(input)
-    .replace(/[ \t]+\n/g, '\n')
+/** Rough nesting depth of an HTML string (open minus close tags, ignoring void/self-closing tags). */
+function htmlNestingExceeds(html: string, limit: number): boolean {
+  let depth = 0;
+  const tag = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)[^>]*?(\/?)>/g;
+  const VOID = new Set(['br', 'img', 'hr', 'meta', 'link', 'input', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr', 'p', 'li', 'td', 'tr', 'th', 'option']);
+  for (let m = tag.exec(html); m; m = tag.exec(html)) {
+    const name = (m[2] ?? '').toLowerCase();
+    if (VOID.has(name) || m[3] === '/') continue;
+    depth += m[1] === '/' ? -1 : 1;
+    if (depth > limit) return true;
+  }
+  return false;
+}
+
+function cheapText(html: string): string {
+  return stripHtmlCheap(html)
+    .replace(/[ \t]+/g, ' ')
+    .replace(/[ \t]*\n[ \t]*/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+export function htmlToPlainText(html: string): string {
+  const input = html.length > HTML_TO_TEXT_MAX_INPUT ? html.slice(0, HTML_TO_TEXT_MAX_INPUT) : html;
+  // Past the depth limit html-to-text would drop the deeper content: keep it via the stripper.
+  if (htmlNestingExceeds(input, HTML_TO_TEXT_MAX_DEPTH)) return cheapText(input);
+  try {
+    htmlConverter ??= compile(HTML_TO_TEXT_OPTIONS);
+    return htmlConverter(input)
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  } catch {
+    // e.g. RangeError: Maximum call stack size exceeded on pathological markup.
+    return cheapText(input);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -259,6 +304,14 @@ export function toJson(value: unknown, space?: number): string {
 }
 
 export const MAX_RESULT_CHARS = 100_000;
+
+/**
+ * Decoded size of a MIME part from its encoded BODYSTRUCTURE size. base64 is written in 76-character
+ * lines plus CRLF, so 78 encoded bytes carry 57 decoded ones.
+ */
+export function decodedSizeEstimate(encodedSize: number, encoding: string | undefined): number {
+  return (encoding ?? '').toLowerCase() === 'base64' ? Math.floor((encodedSize * 57) / 78) : encodedSize;
+}
 
 /** Keep a tool result under ~100k characters, appending a note when cut. */
 export function truncateResult(text: string, max = MAX_RESULT_CHARS): string {

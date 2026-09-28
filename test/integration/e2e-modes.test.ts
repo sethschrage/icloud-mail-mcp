@@ -186,9 +186,10 @@ describe('prompts', () => {
       const { prompts } = await s.client.listPrompts();
       expect(prompts.map((p) => p.name)).toEqual(['triage_inbox', 'summarize_thread']);
       expect(prompts[0]?.arguments?.map((a) => [a.name, a.required ?? false])).toEqual([['days', false]]);
-      expect(prompts[1]?.arguments?.map((a) => [a.name, a.required])).toEqual([
-        ['mailbox', true],
-        ['uid', true],
+      expect(prompts[1]?.arguments?.map((a) => [a.name, a.required ?? false])).toEqual([
+        ['about', false],
+        ['mailbox', false],
+        ['uid', false],
       ]);
 
       const triage = await s.client.getPrompt({ name: 'triage_inbox', arguments: { days: '3' } });
@@ -255,7 +256,7 @@ describe('missing configuration', () => {
     await withSession({ MAIL_ALLOW_SEND: 'maybe' }, async (s) => {
       const r = await s.call('list_mailboxes');
       expect(r.isError).toBe(true);
-      expect(r.text).toMatch(/MAIL_ALLOW_SEND must be true\/false/);
+      expect(r.text).toMatch(/"Allow sending" \(MAIL_ALLOW_SEND\) must be true\/false/);
     });
   });
 });

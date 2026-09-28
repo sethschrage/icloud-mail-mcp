@@ -122,3 +122,16 @@ describe('html-to-text settings', () => {
     expect(text).not.toContain('NAME');
   });
 });
+
+// dos-1: pathological nesting never crashes the HTML conversion.
+describe('htmlToPlainText limits', () => {
+  it('handles very deep nesting and huge numbers of unclosed tags', () => {
+    const deep = `${'<div>'.repeat(12_000)}deep text${'</div>'.repeat(12_000)}`;
+    expect(htmlToPlainText(deep)).toContain('deep text');
+    const unclosed = `${'<a href=x>'.repeat(50_000)}tail`;
+    expect(typeof htmlToPlainText(unclosed)).toBe('string');
+    const tables = `${'<table><tr><td>'.repeat(3000)}cell`;
+    expect(htmlToPlainText(tables)).toContain('cell');
+    expect(htmlToPlainText('<p>Hello <b>world</b></p>')).toBe('Hello world');
+  });
+});

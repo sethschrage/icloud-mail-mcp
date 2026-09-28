@@ -5,11 +5,11 @@
 import { randomUUID } from 'node:crypto';
 import MailComposer from 'nodemailer/lib/mail-composer';
 import type { MailComposerAttachment, MailComposerOptions } from 'nodemailer/lib/mail-composer';
-import type { Config } from '../config.js';
+import { settingName, type Config } from '../config.js';
 import { MailError } from '../errors.js';
 import { formatDateHuman, formatSize, normalizeNewlines } from '../format.js';
 import { readAllowedFile, resolveAllowedFile, type PathContext } from '../safety/paths.js';
-import { dedupeAddresses, domainOf, formatAddress, parseAddressInputs, parseAddressString, type EmailAddress } from './address.js';
+import { dedupeAddresses, domainOf, formatAddressForDisplay, parseAddressInputs, parseAddressString, type EmailAddress } from './address.js';
 
 export * from './address.js';
 
@@ -25,6 +25,10 @@ export interface OutgoingAttachment {
   content: Buffer;
   contentType?: string | undefined;
   cid?: string | undefined;
+  /** 'attachment' keeps forwarded parts (including message/rfc822, which nodemailer would inline) as files. */
+  contentDisposition?: 'attachment' | 'inline' | undefined;
+  /** Name of the real local file when it differs from `filename` (shown in the confirmation dialog). */
+  realName?: string | undefined;
 }
 
 export interface OutgoingMessage {
@@ -50,6 +54,11 @@ export interface BuiltMessage {
   raw: Buffer;
   /** Same message (same Message-ID, Date, boundaries) with the Bcc header, for Sent/Drafts. */
   rawWithBcc: Buffer;
+  /**
+   * The bytes contain 8-bit data (a forwarded message/rfc822 part may only use 8bit, never
+   * base64/QP): SMTP must then declare BODY=8BITMIME (RFC 6152).
+   */
+  eightBit: boolean;
   message: OutgoingMessage;
 }
 
@@ -81,7 +90,7 @@ export function resolveFrom(input: string | undefined, config: Pick<Config, 'all
     return { name: one.name || config.fromName || '', address: allowed };
   }
   const chosen = (preferred && lookup(preferred)) || config.fromAddress;
-  if (!chosen) throw new MailError('CONFIG', 'No From address is configured (set ICLOUD_EMAIL or MAIL_FROM_ADDRESS).');
+  if (!chosen) throw new MailError('CONFIG', `No From address is configured (set ${settingName('ICLOUD_EMAIL')} or ${settingName('MAIL_FROM_ADDRESS')}).`);
   return { name: config.fromName ?? '', address: chosen };
 }
 
@@ -142,7 +151,7 @@ export async function loadAttachments(
   for (const file of resolved) {
     const content = await readAllowedFile(file, budgetBytes - used);
     used += content.length;
-    out.push({ filename: file.name, content });
+    out.push({ filename: file.name, content, ...(file.realName !== file.name ? { realName: file.realName } : {}) });
   }
   return out;
 }
@@ -151,7 +160,13 @@ function toComposerAttachment(a: OutgoingAttachment): MailComposerAttachment {
   const att: MailComposerAttachment = { filename: a.filename, content: a.content };
   if (a.contentType) att.contentType = a.contentType;
   if (a.cid) att.cid = a.cid;
+  if (a.contentDisposition) att.contentDisposition = a.contentDisposition;
   return att;
+}
+
+function hasEightBit(buf: Buffer): boolean {
+  for (let i = 0; i < buf.length; i++) if ((buf[i] as number) > 0x7f) return true;
+  return false;
 }
 
 /** Message-ID in the From address's domain. */
@@ -194,7 +209,7 @@ export async function buildMessage(msg: OutgoingMessage, options: { date?: Date;
     throw new MailError('TOO_LARGE', `The message is ${formatSize(rawWithBcc.length)}, above iCloud's 20 MB limit. Remove or shrink attachments.`);
   }
   const envFrom = typeof envelope.from === 'string' ? envelope.from : msg.from.address;
-  return { messageId: node.messageId(), date, envelope: { from: envFrom, to: [...envelope.to] }, raw, rawWithBcc, message: msg };
+  return { messageId: node.messageId(), date, envelope: { from: envFrom, to: [...envelope.to] }, raw, rawWithBcc, eightBit: hasEightBit(raw), message: msg };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -204,6 +219,8 @@ export async function buildMessage(msg: OutgoingMessage, options: { date?: Date;
 /** Data from the original message needed to reply/forward. */
 export interface OriginalMessage {
   messageId: string | null;
+  /** The original's own In-Reply-To (used when it has no References). */
+  inReplyTo?: string | null | undefined;
   references: string[];
   subject: string;
   time: number;
@@ -213,6 +230,8 @@ export interface OriginalMessage {
   cc: EmailAddress[];
   /** Plain-text body (already converted from HTML where needed). */
   text: string;
+  /** The original HTML body, when it has one (forwards include it). */
+  html?: string | null | undefined;
 }
 
 const REPLY_PREFIX = /^\s*(re|aw|sv|antw)\s*(\[\d+\])?\s*:/i;
@@ -229,41 +248,66 @@ export function forwardSubject(subject: string): string {
 }
 
 /**
- * Reply recipients (SPEC §6.6 #16): To = Reply-To else From; reply-all adds the original To (to To)
- * and Cc (to Cc); our own allowed addresses are removed; dedupe; if nothing is left (replying to
- * our own sent message) use the original To.
+ * Reply recipients (SPEC §6.6 #16). The primary recipient, step by step:
+ * 1. Reply-To minus our own addresses;
+ * 2. else From minus our own addresses (a Reply-To that only names the user, as "sent on your
+ *    behalf" services set it, must not redirect a private reply to the other To recipients);
+ * 3. else (From is us too: a message we sent) the original To minus our own addresses;
+ * With reply-all the original To (to To) and Cc (to Cc), minus our own addresses, are added, and
+ * Cc is promoted to To when To would be empty. Deduped. When nobody but the user is left (a note
+ * to self), the original To as it is.
  */
 export function computeReplyRecipients(original: Pick<OriginalMessage, 'from' | 'replyTo' | 'to' | 'cc'>, ownAddresses: readonly string[], replyAll: boolean): { to: EmailAddress[]; cc: EmailAddress[] } {
   const own = new Set(ownAddresses.map((a) => a.toLowerCase()));
-  const notOwn = (a: EmailAddress): boolean => !!a.address && !own.has(a.address.toLowerCase());
-  const primary = original.replyTo.length ? original.replyTo : original.from;
+  const valid = (a: EmailAddress): boolean => !!a.address;
+  const notOwn = (a: EmailAddress): boolean => valid(a) && !own.has(a.address.toLowerCase());
+  let primary = original.replyTo.filter(notOwn);
+  if (primary.length === 0) primary = original.from.filter(notOwn);
+  if (primary.length === 0) primary = original.to.filter(notOwn);
   const seen = new Set<string>();
-  let to = dedupeAddresses([...primary, ...(replyAll ? original.to : [])].filter(notOwn), seen);
-  let cc = dedupeAddresses((replyAll ? original.cc : []).filter(notOwn), seen);
+  let to = dedupeAddresses([...primary, ...(replyAll ? original.to.filter(notOwn) : [])], seen);
+  let cc = dedupeAddresses((replyAll ? original.cc.filter(notOwn) : []).filter((a) => !seen.has(a.address.toLowerCase())), seen);
   if (to.length === 0 && cc.length > 0) {
     to = cc;
     cc = [];
   }
-  if (to.length === 0) to = dedupeAddresses(original.to.filter((a) => !!a.address));
+  // Nobody but us anywhere: a note to self goes back to its own To (else its From).
+  if (to.length === 0) to = dedupeAddresses(original.to.filter(valid));
+  if (to.length === 0) to = dedupeAddresses(original.from.filter(valid));
   return { to, cc };
 }
 
-/** References = original References + original Message-ID, deduplicated, last 20. */
-export function buildReferences(originalReferences: readonly string[], originalMessageId: string | null): string[] {
-  const all = [...originalReferences, ...(originalMessageId ? [originalMessageId] : [])];
+/**
+ * References (RFC 5322 §3.6.4) = the original's References (or, when it has none, its single
+ * In-Reply-To) + its Message-ID, deduplicated. When trimmed to MAX_REFERENCES, the first ID (the
+ * thread root, which References-based threading relies on) is kept with the most recent ones.
+ */
+export function buildReferences(originalReferences: readonly string[], originalInReplyTo: string | null | undefined, originalMessageId: string | null): string[] {
+  const base = originalReferences.length ? [...originalReferences] : originalInReplyTo ? [originalInReplyTo] : [];
+  const all = [...base, ...(originalMessageId ? [originalMessageId] : [])];
   const unique: string[] = [];
   for (const id of all) if (!unique.includes(id)) unique.push(id);
-  return unique.slice(-MAX_REFERENCES);
+  if (unique.length <= MAX_REFERENCES) return unique;
+  return [unique[0] as string, ...unique.slice(-(MAX_REFERENCES - 1))];
 }
 
-/** Default From for a reply: the allowed address the original was sent to (alias-aware). */
-export function replyFromCandidate(original: Pick<OriginalMessage, 'to' | 'cc'>, allowedFrom: readonly string[]): string | undefined {
+/**
+ * Default From for a reply or forward: the allowed address the original came from (replying to
+ * or forwarding your own message sent from an alias keeps that alias private-address-safe), else
+ * the allowed address it was sent to (alias-aware), else undefined (MAIL_FROM_ADDRESS).
+ */
+export function replyFromCandidate(original: Pick<OriginalMessage, 'from' | 'to' | 'cc'>, allowedFrom: readonly string[]): string | undefined {
   const allowed = new Map(allowedFrom.map((a) => [a.toLowerCase(), a]));
-  for (const a of [...original.to, ...original.cc]) {
+  for (const a of [...original.from, ...original.to, ...original.cc]) {
     const hit = allowed.get(a.address.toLowerCase());
     if (hit) return hit;
   }
   return undefined;
+}
+
+/** An address from the original for use in body text: one line, name capped, address in full. */
+export function formatAddressForText(a: EmailAddress): string {
+  return formatAddressForDisplay(a, 100);
 }
 
 export function quoteText(text: string, cap = MAX_QUOTED_CHARS): string {
@@ -276,7 +320,9 @@ export function quoteText(text: string, cap = MAX_QUOTED_CHARS): string {
 }
 
 export function attributionLine(original: Pick<OriginalMessage, 'time' | 'from'>, timeZone: string): string {
-  const sender = original.from[0] ? formatAddress(original.from[0]) : 'unknown sender';
+  // A display name decoded from the email can carry line breaks: never let it add lines to the
+  // user's own (unquoted) text.
+  const sender = original.from[0] ? formatAddressForText(original.from[0]) : 'unknown sender';
   return `On ${formatDateHuman(original.time || null, timeZone)}, ${sender} wrote:`;
 }
 
@@ -289,7 +335,7 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function textToHtml(text: string): string {
+export function textToHtml(text: string): string {
   return escapeHtml(normalizeNewlines(text)).replace(/\n/g, '<br>\n');
 }
 
@@ -308,12 +354,12 @@ export const FORWARD_SEPARATOR = '---------- Forwarded message ----------';
 export function forwardHeaderLines(original: Pick<OriginalMessage, 'from' | 'time' | 'subject' | 'to' | 'cc'>, timeZone: string): string[] {
   const lines = [
     FORWARD_SEPARATOR,
-    `From: ${original.from.map(formatAddress).join(', ') || 'unknown'}`,
+    `From: ${original.from.map(formatAddressForText).join(', ') || 'unknown'}`,
     `Date: ${formatDateHuman(original.time || null, timeZone)}`,
     `Subject: ${cleanSubject(original.subject) || '(no subject)'}`,
-    `To: ${original.to.map(formatAddress).join(', ') || '(none)'}`,
+    `To: ${original.to.map(formatAddressForText).join(', ') || '(none)'}`,
   ];
-  if (original.cc.length) lines.push(`Cc: ${original.cc.map(formatAddress).join(', ')}`);
+  if (original.cc.length) lines.push(`Cc: ${original.cc.map(formatAddressForText).join(', ')}`);
   return lines;
 }
 
@@ -324,7 +370,29 @@ export function buildForwardText(note: string, original: OriginalMessage, timeZo
   return `${n ? `${n}\n\n` : ''}${block}\n\n${body}\n`;
 }
 
+/**
+ * The original's HTML made safe to forward: its <body> content (plus <style> blocks from <head>),
+ * without scripts, frames, embedded objects, meta refreshes, event-handler attributes or
+ * javascript: URLs. cid: references keep working when the inline images are re-attached with their
+ * Content-IDs.
+ */
+export function sanitizeForwardedHtml(html: string): string {
+  const head = /<head\b[^>]*>([\s\S]*?)<\/head\s*>/i.exec(html)?.[1] ?? '';
+  const styles = [...head.matchAll(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi)].map((m) => m[0]).join('\n');
+  const bodyMatch = /<body\b[^>]*>([\s\S]*?)(?:<\/body\s*>|$)/i.exec(html);
+  let body = bodyMatch
+    ? (bodyMatch[1] ?? '')
+    : html.replace(/<head\b[^>]*>[\s\S]*?<\/head\s*>/i, '').replace(/<!doctype[^>]*>/i, '').replace(/<\/?html\b[^>]*>/gi, '');
+  body = body
+    .replace(/<(script|iframe|object|embed|applet|frameset|frame|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, '')
+    .replace(/<\/?(script|iframe|object|embed|applet|frameset|frame|base|link|meta)\b[^>]*>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\b(href|src|action|formaction)\s*=\s*(["']?)\s*(?:javascript|vbscript|data:text\/html)[^"'\s>]*\2/gi, '$1="#"');
+  return `${styles}${styles ? '\n' : ''}${body}`;
+}
+
 export function buildForwardHtml(noteHtml: string, original: OriginalMessage, timeZone: string): string {
   const block = forwardHeaderLines(original, timeZone).map(escapeHtml).join('<br>\n');
-  return `${noteHtml}\n<br>\n<div>${block}</div>\n<br>\n<div>${textToHtml(original.text)}</div>\n`;
+  const body = original.html ? sanitizeForwardedHtml(original.html) : textToHtml(original.text);
+  return `${noteHtml}\n<br>\n<div>${block}</div>\n<br>\n<div>${body}</div>\n`;
 }

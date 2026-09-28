@@ -4,6 +4,9 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { MailError } from '../../src/errors.js';
 import {
+  attachmentSaveError,
+  isRiskyFileName,
+  markQuarantined,
   collisionName,
   createUniqueFile,
   expandPath,
@@ -182,5 +185,60 @@ describe('confinement of attachment paths', () => {
     expect(isInside('/a/b', '/a/b')).toBe(false);
     expect(isInside('/a/b', '/a/bc')).toBe(false);
     expect(isInside('/a/b', '/a')).toBe(false);
+  });
+});
+
+// files-1: downloads get the macOS quarantine attribute.
+describe('markQuarantined', () => {
+  it('runs xattr on darwin with a 0081-flagged value and reports a failure', async () => {
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const ok = await markQuarantined('/Users/j/Downloads/a.zip', {
+      platform: 'darwin',
+      now: () => 0x65000000 * 1000,
+      exec: (file, args) => {
+        calls.push({ file, args });
+        return Promise.resolve({ stdout: '', stderr: '', code: 0 });
+      },
+    });
+    expect(ok).toBeUndefined();
+    expect(calls[0]?.file).toBe('/usr/bin/xattr');
+    expect(calls[0]?.args.slice(0, 2)).toEqual(['-w', 'com.apple.quarantine']);
+    expect(calls[0]?.args[2]).toMatch(/^0081;65000000;icloud-mail-mcp;[0-9A-F-]{36}$/);
+    expect(calls[0]?.args[3]).toBe('/Users/j/Downloads/a.zip');
+    const failed = await markQuarantined('/x', { platform: 'darwin', exec: () => Promise.resolve({ stdout: '', stderr: 'no', code: 1 }) });
+    expect(failed).toMatch(/could not be marked/);
+  });
+
+  it('does nothing elsewhere and flags risky file types', async () => {
+    let called = false;
+    expect(
+      await markQuarantined('/x', {
+        platform: 'linux',
+        exec: () => {
+          called = true;
+          return Promise.resolve({ stdout: '', stderr: '', code: 0 });
+        },
+      }),
+    ).toBeUndefined();
+    expect(called).toBe(false);
+    for (const n of ['Invoice.zip', 'setup.PKG', 'x.command', 'doc.docm', 'a.dmg']) expect(isRiskyFileName(n), n).toBe(true);
+    for (const n of ['report.pdf', 'photo.jpeg', 'notes.txt']) expect(isRiskyFileName(n), n).toBe(false);
+  });
+});
+
+// integ-4 / docs-6 / tests-10: local file-system errors are not "IMAP errors".
+describe('attachmentSaveError', () => {
+  const err = (code: string): NodeJS.ErrnoException => Object.assign(new Error(`${code}: boom`), { code });
+  it('maps EPERM on macOS to the privacy hint', () => {
+    const e = attachmentSaveError(err('EPERM'), '/Users/j/Downloads/iCloud Mail Attachments', 'darwin');
+    expect(e?.code).toBe('CONFIG');
+    expect(e?.message).toMatch(/Privacy & Security → Files and Folders/);
+    expect(e?.message).toContain('"Attachment download folder"');
+  });
+  it('maps ENOTDIR, ENOSPC and ignores non-fs errors', () => {
+    expect(attachmentSaveError(err('ENOTDIR'), '/etc/hostname/x', 'linux')?.message).toMatch(/part of that path is a file/);
+    expect(attachmentSaveError(err('ENOSPC'), '/d', 'linux')?.message).toMatch(/disk is full/);
+    expect(attachmentSaveError(new Error('socket closed'), '/d', 'linux')).toBeNull();
+    expect(attachmentSaveError(new MailError('SERVER', 'x'), '/d', 'linux')).toBeNull();
   });
 });

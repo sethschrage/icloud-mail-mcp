@@ -40,6 +40,46 @@ export function isValidEmailAddress(input: string): boolean {
   return normalizeEmailAddress(input) !== null;
 }
 
+// C0/C1 controls and Unicode line/paragraph separators: never allowed inside a single-line value.
+// eslint-disable-next-line no-control-regex
+const LINE_BREAKING = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+// Format characters (bidi overrides/isolates, zero-width, soft hyphen, …) including the Unicode
+// tag block used for invisible "ASCII smuggling"; they can disguise or hide text.
+const INVISIBLE_FORMAT = /[\p{Cf}\u{E0000}-\u{E007F}]/gu;
+
+/** An email-address-like token inside free text (e.g. a display name). */
+export const EMAIL_LIKE = /[^\s<>"'(),;]+@[^\s<>"'(),;]+\.[^\s<>"'(),;]+/;
+
+/**
+ * Make a display name safe to show or reuse: no line breaks or controls (CR/LF from an RFC 2047
+ * encoded-word would otherwise forge extra lines), no invisible/bidi format characters, whitespace
+ * collapsed, at most `max` code points (with an ellipsis when cut).
+ */
+export function displayName(name: string | undefined | null, max = 100): string {
+  if (!name) return '';
+  const cleaned = name.replace(LINE_BREAKING, ' ').replace(INVISIBLE_FORMAT, '').replace(/\s+/g, ' ').trim();
+  const chars = Array.from(cleaned);
+  return chars.length > max ? `${chars.slice(0, Math.max(1, max - 1)).join('').trimEnd()}…` : cleaned;
+}
+
+/**
+ * "Name <addr>" for display: the address is always shown in full; only the (sanitised) name is
+ * capped, so a long or hostile display name can never push the real address out of view.
+ */
+export function formatAddressForDisplay(a: { name?: string | undefined; address?: string | undefined }, nameMax = 100): string {
+  const address = (a.address ?? '').replace(LINE_BREAKING, '').replace(INVISIBLE_FORMAT, '').trim();
+  const name = displayName(a.name, nameMax);
+  if (!name || name.toLowerCase() === address.toLowerCase()) return address || name;
+  if (!address) return name;
+  return `${name} <${address}>`;
+}
+
+/** True when a display name contains an email address other than the real one (a spoofing sign). */
+export function nameHidesOtherAddress(a: { name?: string | undefined; address?: string | undefined }): boolean {
+  const m = EMAIL_LIKE.exec(displayName(a.name, 1000));
+  return !!m && m[0].toLowerCase().replace(/^[<(]|[>)]$/g, '') !== (a.address ?? '').toLowerCase();
+}
+
 /**
  * Parse one recipient string ("addr", "Name <addr>", or a comma-separated list of those) into
  * validated addresses. Rejects control characters, group syntax and entries without an address.
@@ -65,7 +105,19 @@ export function parseAddressString(input: string, field = 'address'): EmailAddre
         `${field} "${input}": "${shown}" is not a valid email address. Use "user@example.com" or "Name <user@example.com>" (quote display names that contain commas).`,
       );
     }
-    const name = (entry.name ?? '').replace(/\s+/g, ' ').trim().slice(0, 256);
+    let name = displayName(entry.name, 256);
+    // "a@x.com b@y.com" parses as one address with the second one as its display name, and
+    // "<a@x> <b@y>" likewise: never silently drop a recipient by re-reading it as a name.
+    if (name && EMAIL_LIKE.test(name)) {
+      if (name.toLowerCase().replace(/^["'<]+|["'>]+$/g, '') === address.toLowerCase()) {
+        name = '';
+      } else {
+        throw new MailError(
+          'INVALID_INPUT',
+          `${field} "${input}" seems to contain more than one address; separate addresses with commas or pass each one as its own list item (a display name must not contain an email address).`,
+        );
+      }
+    }
     out.push({ name, address });
   }
   return out;

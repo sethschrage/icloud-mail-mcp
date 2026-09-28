@@ -128,19 +128,43 @@ describe('body part selection', () => {
 
 describe('attachment discovery', () => {
   it('lists disposition=attachment parts', () => {
-    expect(collectAttachments(invoice)).toEqual([{ part: '2', filename: 'Invoice.pdf', content_type: 'application/pdf', size: 948, inline: false, content_id: null }]);
+    expect(collectAttachments(invoice)).toEqual([expect.objectContaining({ part: '2', filename: 'Invoice.pdf', content_type: 'application/pdf', size: 948, inline: false, content_id: null })]);
     expect(hasRealAttachments(invoice)).toBe(true);
   });
 
   it('marks inline images with a Content-ID and excludes them from has_attachments', () => {
-    expect(collectAttachments(related)).toEqual([{ part: '2', filename: 'summit.png', content_type: 'image/png', size: 706, inline: true, content_id: '<summit@x>' }]);
+    expect(collectAttachments(related)).toEqual([expect.objectContaining({ part: '2', filename: 'summit.png', content_type: 'image/png', size: 706, inline: true, content_id: '<summit@x>' })]);
     expect(hasRealAttachments(related)).toBe(false);
   });
 
   it('lists message/rfc822 parts and non-text parts with a name', () => {
-    expect(collectAttachments(forwarded)).toEqual([{ part: '2', filename: null, content_type: 'message/rfc822', size: 381, inline: false, content_id: null }]);
+    expect(collectAttachments(forwarded)).toEqual([expect.objectContaining({ part: '2', filename: null, content_type: 'message/rfc822', size: 381, inline: false, content_id: null })]);
     const named: MessageStructureObject = { type: 'multipart/mixed', childNodes: [{ part: '1', type: 'text/plain' }, { part: '2', type: 'application/zip', parameters: { name: 'a.zip' } }] };
     expect(collectAttachments(named).map((a) => a.filename)).toEqual(['a.zip']);
+  });
+
+  // imap-13: Apple Mail sends attached photos as inline images with a filename and a Content-ID.
+  it('counts an inline photo with a filename as an attachment, but not a small named logo or a nameless cid image', () => {
+    const photo: MessageStructureObject = {
+      type: 'multipart/related',
+      childNodes: [
+        { part: '1', type: 'text/html', size: 300 },
+        { part: '2', type: 'image/jpeg', id: '<x@y>', disposition: 'inline', dispositionParameters: { filename: 'IMG_1234.jpeg' }, size: 12_000, encoding: 'base64' },
+      ],
+    };
+    expect(hasRealAttachments(photo)).toBe(true);
+    const big: MessageStructureObject = {
+      type: 'multipart/related',
+      childNodes: [{ part: '1', type: 'text/html' }, { part: '2', type: 'image/png', id: '<p@y>', disposition: 'inline', dispositionParameters: { filename: 'beach.png' }, size: 900_000 }],
+    };
+    expect(hasRealAttachments(big)).toBe(true);
+    const logo: MessageStructureObject = {
+      type: 'multipart/related',
+      childNodes: [{ part: '1', type: 'text/html' }, { part: '2', type: 'image/png', id: '<l@y>', disposition: 'inline', dispositionParameters: { filename: 'image001.png' }, size: 4000 }],
+    };
+    expect(hasRealAttachments(logo)).toBe(false);
+    const nameless: MessageStructureObject = { type: 'multipart/related', childNodes: [{ part: '1', type: 'text/html' }, { part: '2', type: 'image/gif', id: '<t@y>', size: 200_000 }] };
+    expect(hasRealAttachments(nameless)).toBe(false);
   });
 
   it('finds parts by number but not inside attached messages', () => {
@@ -149,5 +173,17 @@ describe('attachment discovery', () => {
     expect(findPart(forwarded, '2')?.type).toBe('message/rfc822');
     expect(findPart(related, '3')).toBeNull();
     expect(findPart({ type: 'text/plain' }, '1')?.type).toBe('text/plain');
+  });
+});
+
+// fwd-1: forwarded attachments keep the Content-Type parameters that matter.
+describe('forwardedContentType', () => {
+  it('keeps charset for text (what imapflow delivered) and method for calendar invitations', async () => {
+    const { forwardedContentType } = await import('../../src/imap/fetch.js');
+    expect(forwardedContentType('text/csv', { type: 'text/csv', parameters: { charset: 'ISO-8859-1', name: 'a.csv' } }, undefined)).toBe('text/csv; charset=iso-8859-1');
+    expect(forwardedContentType('text/plain', { type: 'text/plain', parameters: { charset: 'shift_jis' } }, 'utf-8')).toBe('text/plain; charset=utf-8');
+    expect(forwardedContentType('text/calendar', { type: 'text/calendar', parameters: { charset: 'utf-8', method: 'request' } }, undefined)).toBe('text/calendar; charset=utf-8; method=REQUEST');
+    expect(forwardedContentType('application/pdf', { type: 'application/pdf', parameters: { charset: 'x' } }, undefined)).toBe('application/pdf');
+    expect(forwardedContentType('text/plain', { type: 'text/plain', parameters: { charset: 'bad"; x=y' } }, undefined)).toBe('text/plain');
   });
 });

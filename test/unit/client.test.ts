@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { CredentialProvider } from '../../src/credentials.js';
 import { MailError } from '../../src/errors.js';
-import { ImapManager, imapLoginCandidates, isConnectionError, mapImapError } from '../../src/imap/client.js';
+import { ImapManager, imapLoginCandidates, isConnectionError, isCredentialFailure, mapImapError, serverTextOf } from '../../src/imap/client.js';
 import { clearSecrets, createLogger, registerSecret } from '../../src/log.js';
 
 type Listener = (...args: unknown[]) => void;
@@ -47,7 +47,10 @@ class FakeImap {
     this.usable = true;
     return Promise.resolve();
   }
+  static lockErrors: Error[] = [];
   getMailboxLock(p: string, opts: { readOnly?: boolean }): Promise<{ path: string; release: () => void }> {
+    const lockErr = FakeImap.lockErrors.shift();
+    if (lockErr) return Promise.reject(lockErr);
     const lock = { path: p, readOnly: !!opts.readOnly, released: false };
     this.locks.push(lock);
     this.mailbox = { path: p, readOnly: !!opts.readOnly, exists: 3 };
@@ -154,7 +157,7 @@ describe('ImapManager', () => {
     expect(err).toBeInstanceOf(MailError);
     expect(err?.code).toBe('AUTH');
     expect(err?.message).toContain('"me@custom.dev"');
-    expect(err?.message).toMatch(/custom-domain users must log in with their @icloud\.com address/);
+    expect(err?.message).toMatch(/custom-domain users: enter your primary @icloud\.com address as "iCloud email address"/);
     expect(created).toHaveLength(1);
     expect(invalidations()).toBe(1);
   });
@@ -291,6 +294,72 @@ describe('ImapManager', () => {
     expect(opts.rejectUnauthorized).toBeUndefined();
     const missing = manager({ ICLOUD_EMAIL: 'john@custom.dev', MAIL_TLS_CA_FILE: path.join(dir, 'nope.pem') }).m;
     expect(() => missing.tlsOptions()).toThrow(/MAIL_TLS_CA_FILE could not be read/);
+  });
+});
+
+describe('stuck connections', () => {
+  // imap-4: a lock wait that times out means the holder is stuck: reset and retry once, even for writes.
+  it('replaces the connection after a mailbox lock timeout and retries once', async () => {
+    const { m, created } = manager({ ICLOUD_EMAIL: 'john@icloud.com' });
+    FakeImap.lockErrors = [Object.assign(new Error('lock wait timed out'), { code: 'LockTimeout' })];
+    const r = await m.withMailbox('INBOX', async () => 'ok', { readOnly: false, retry: false });
+    expect(r).toBe('ok');
+    expect(created).toHaveLength(2);
+    expect(FakeImap.instances[0]?.closed).toBe(true);
+  });
+
+  it('gives up with a CONNECTION error when the lock also times out on the new connection', async () => {
+    const { m } = manager({ ICLOUD_EMAIL: 'john@icloud.com' });
+    const lockErr = (): Error => Object.assign(new Error('lock wait timed out'), { code: 'LockTimeout' });
+    FakeImap.lockErrors = [lockErr(), lockErr()];
+    const e = await m.withMailbox('INBOX', async () => 'ok', { readOnly: true }).catch((err: unknown) => err as MailError);
+    expect(e).toBeInstanceOf(MailError);
+    expect((e as MailError).code).toBe('CONNECTION');
+    FakeImap.lockErrors = [];
+  });
+});
+
+describe('connection options', () => {
+  // imap-9: no ENABLE CONDSTORE / UTF8=ACCEPT after login.
+  it('disables imapflow\'s auto-ENABLE and QRESYNC', async () => {
+    const { m, created } = manager({ ICLOUD_EMAIL: 'john@icloud.com' });
+    await m.connection();
+    expect(created[0]?.disableAutoEnable).toBe(true);
+    expect(created[0]?.qresync).toBe(false);
+  });
+
+  // tls-1: without implicit TLS, STARTTLS is mandatory unless the test-only switch is set.
+  it('requires STARTTLS when IMAP_SECURE=false', async () => {
+    const a = manager({ ICLOUD_EMAIL: 'john@icloud.com', IMAP_SECURE: 'false' });
+    await a.m.connection();
+    expect(a.created[0]?.doSTARTTLS).toBe(true);
+    const b = manager({ ICLOUD_EMAIL: 'john@icloud.com', IMAP_SECURE: 'false', IMAP_ALLOW_PLAINTEXT: 'true' });
+    await b.m.connection();
+    expect(b.created[0]?.doSTARTTLS).toBeUndefined();
+    const c = manager({ ICLOUD_EMAIL: 'john@icloud.com' });
+    await c.m.connection();
+    expect(c.created[0]?.doSTARTTLS).toBeUndefined();
+  });
+});
+
+// integ-2: only credential response codes mean a wrong password.
+describe('login refusal classification', () => {
+  it('uses the RFC 5530 response code', () => {
+    expect(isCredentialFailure({ authenticationFailed: true, serverResponseCode: 'UNAVAILABLE' })).toBe(false);
+    expect(isCredentialFailure({ authenticationFailed: true, serverResponseCode: 'LIMIT' })).toBe(false);
+    expect(isCredentialFailure({ authenticationFailed: true })).toBe(true);
+    expect(isCredentialFailure({ serverResponseCode: 'AUTHENTICATIONFAILED' })).toBe(true);
+    expect(isCredentialFailure({ code: 'ECONNRESET' })).toBe(false);
+    const e = mapImapError({ authenticationFailed: true, serverResponseCode: 'UNAVAILABLE', response: '2 NO [UNAVAILABLE] Maximum number of connections' }, { host: 'h', port: 1 });
+    expect(e.code).toBe('CONNECTION');
+    expect(e.message).toContain('(server said: [UNAVAILABLE] Maximum number of connections)');
+    expect(mapImapError({ authenticationFailed: true }, { host: 'h', port: 1, users: ['a@icloud.com'] }).code).toBe('AUTH');
+  });
+
+  it('quotes the server text without the tag', () => {
+    expect(serverTextOf({ response: 'A7 NO [ALERT] Slow down' })).toBe('[ALERT] Slow down');
+    expect(serverTextOf({ responseText: 'Try later', serverResponseCode: 'INUSE' })).toBe('[INUSE] Try later');
+    expect(serverTextOf({})).toBeUndefined();
   });
 });
 

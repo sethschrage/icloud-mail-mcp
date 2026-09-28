@@ -1,10 +1,12 @@
 /**
  * Path expansion, confinement and filename sanitising (SPEC §3, §6.2, §6.4).
  */
+import { randomUUID } from 'node:crypto';
 import { constants as fsConstants, promises as fsp } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import type { ExecFileFn } from '../credentials.js';
 import { MailError } from '../errors.js';
 
 export interface PathContext {
@@ -200,11 +202,73 @@ export async function createUniqueFile(dir: string, filename: string, maxAttempt
   throw new MailError('CONFLICT', `Could not find a free filename for "${filename}" in ${dirReal}.`);
 }
 
+const MACOS_PRIVACY_HINT =
+  'macOS may be blocking access: allow Claude in System Settings → Privacy & Security → Files and Folders (turn on the folder), then try again';
+
+function errnoCode(err: unknown): string | undefined {
+  const c = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof c === 'string' ? c : undefined;
+}
+
+/**
+ * Turn a local file-system error while saving an attachment into an actionable MailError (instead
+ * of it surfacing as an "IMAP error"). Returns null for errors that are not file-system errors.
+ */
+export function attachmentSaveError(err: unknown, dir: string, platform: NodeJS.Platform = process.platform): MailError | null {
+  if (err instanceof MailError) return null;
+  const code = errnoCode(err);
+  if (!code) return null;
+  if (code === 'ENOSPC' || code === 'EDQUOT') {
+    return new MailError('CONFIG', `Could not save the attachment in "${dir}": the disk is full (${code}). Free up some space and try again.`, { cause: err });
+  }
+  if (!['EPERM', 'EACCES', 'EROFS', 'ENOTDIR', 'EISDIR', 'ENOENT', 'ELOOP', 'ENAMETOOLONG', 'EEXIST'].includes(code)) return null;
+  const privacy = platform === 'darwin' && (code === 'EPERM' || code === 'EACCES') ? ` ${MACOS_PRIVACY_HINT}, or choose another folder.` : '';
+  const kind = code === 'ENOTDIR' || code === 'EEXIST' || code === 'EISDIR' ? ' (part of that path is a file, not a folder)' : code === 'EROFS' ? ' (the disk is read-only)' : '';
+  return new MailError(
+    'CONFIG',
+    `Could not save the attachment in "${dir}" (${code})${kind}. Check the "Attachment download folder" setting (MAIL_ATTACHMENT_DIR).${privacy}`,
+    { cause: err },
+  );
+}
+
+/** Extensions of files that run code or install software when opened. */
+const RISKY_EXTENSIONS = new Set(['.app', '.pkg', '.mpkg', '.dmg', '.command', '.sh', '.tool', '.terminal', '.scpt', '.applescript', '.workflow', '.jar', '.zip', '.docm', '.xlsm', '.pptm', '.iso', '.exe', '.msi', '.bat', '.js']);
+
+export function isRiskyFileName(name: string): boolean {
+  return RISKY_EXTENSIONS.has(path.extname(name).toLowerCase());
+}
+
+export interface QuarantineOptions {
+  platform?: NodeJS.Platform;
+  exec: ExecFileFn;
+  xattrPath?: string;
+  now?: () => number;
+}
+
+/**
+ * Mark a downloaded file as coming from the internet (macOS `com.apple.quarantine`), as Apple Mail
+ * and Safari do, so Gatekeeper checks it and macOS asks before opening an app or installer (and
+ * anything extracted from a quarantined archive is quarantined too). The "user approved" bit
+ * (0x0040) is never set. Returns a note when the attribute could not be set; no-op elsewhere.
+ */
+export async function markQuarantined(filePath: string, options: QuarantineOptions): Promise<string | undefined> {
+  if ((options.platform ?? process.platform) !== 'darwin') return undefined;
+  const seconds = Math.floor((options.now ?? Date.now)() / 1000).toString(16);
+  const value = `0081;${seconds};icloud-mail-mcp;${randomUUID().toUpperCase()}`;
+  const r = await options.exec(options.xattrPath ?? '/usr/bin/xattr', ['-w', 'com.apple.quarantine', value, filePath], { timeoutMs: 10_000 });
+  if (r.error || r.code !== 0) {
+    return 'The file could not be marked as downloaded from the internet (macOS quarantine), so macOS will not warn before it is opened; treat it with care.';
+  }
+  return undefined;
+}
+
 export interface AllowedFile {
   /** Real (symlink-free) path of the file. */
   realPath: string;
   /** Name to use for the attachment (basename of the path the caller gave). */
   name: string;
+  /** Basename of the real file (differs from `name` when the path went through a symlink). */
+  realName: string;
   size: number;
 }
 
@@ -219,18 +283,27 @@ export async function resolveAllowedFile(input: string, allowedDirs: readonly st
   if (!path.isAbsolute(expanded)) {
     throw new MailError('INVALID_INPUT', `Attachment path "${input}" must be absolute (or start with ~/).`);
   }
+  if (allowedDirs.length === 0) {
+    throw new MailError('FORBIDDEN', 'Attaching local files is switched off ("Attach files from" / MAIL_ATTACH_FROM_DIRS is set to none).');
+  }
   const allowed: Array<{ expanded: string; real: string }> = [];
+  const denied: string[] = [];
   for (const dir of allowedDirs) {
     const exp = expandPath(dir, ctx);
     if (!path.isAbsolute(exp)) continue;
     try {
       allowed.push({ expanded: exp, real: await fsp.realpath(exp) });
-    } catch {
-      // Allowed directory that does not exist: ignore it.
+    } catch (err) {
+      // An allowed directory that does not exist is ignored; one we may not read is reported.
+      const code = errnoCode(err);
+      if (code === 'EPERM' || code === 'EACCES') denied.push(exp);
     }
   }
   const allowedList = allowedDirs.join(', ') || '(none)';
   if (allowed.length === 0) {
+    if (denied.length) {
+      throw new MailError('FORBIDDEN', `Access to the attachment folders was denied (${denied.join(', ')}). ${MACOS_PRIVACY_HINT}.`);
+    }
     throw new MailError('FORBIDDEN', `No attachment folder is available: none of the allowed folders exists ("Attach files from" in the extension settings, or MAIL_ATTACH_FROM_DIRS): ${allowedList}.`);
   }
 
@@ -250,6 +323,7 @@ export async function resolveAllowedFile(input: string, allowedDirs: readonly st
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'ENOENT' || code === 'ENOTDIR') throw new MailError('NOT_FOUND', `Attachment file not found: ${input}`);
+    if (code === 'EPERM' || code === 'EACCES') throw new MailError('FORBIDDEN', `Cannot access attachment "${input}" (${code}). ${MACOS_PRIVACY_HINT}.`);
     throw new MailError('INVALID_INPUT', `Cannot access attachment "${input}": ${code ?? 'error'}`);
   }
   const root = allowed.find((a) => isInside(a.real, real));
@@ -264,7 +338,7 @@ export async function resolveAllowedFile(input: string, allowedDirs: readonly st
   }
   const st = await fsp.stat(real);
   if (!st.isFile()) throw new MailError('INVALID_INPUT', `Attachment "${input}" is not a regular file.`);
-  return { realPath: real, name: path.basename(expanded), size: st.size };
+  return { realPath: real, name: path.basename(expanded), realName: path.basename(real), size: st.size };
 }
 
 /**
@@ -272,7 +346,14 @@ export async function resolveAllowedFile(input: string, allowedDirs: readonly st
  * remaining size budget at read time (O_NOFOLLOW guards against a last-moment symlink swap).
  */
 export async function readAllowedFile(file: AllowedFile, maxBytes: number): Promise<Buffer> {
-  const handle = await fsp.open(file.realPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let handle: FileHandle;
+  try {
+    handle = await fsp.open(file.realPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === 'EPERM' || code === 'EACCES') throw new MailError('FORBIDDEN', `Cannot read attachment "${file.name}" (${code}). ${MACOS_PRIVACY_HINT}.`);
+    throw err;
+  }
   try {
     const st = await handle.stat();
     if (!st.isFile()) throw new MailError('INVALID_INPUT', `Attachment "${file.name}" is not a regular file.`);

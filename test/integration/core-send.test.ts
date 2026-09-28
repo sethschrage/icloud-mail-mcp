@@ -282,7 +282,7 @@ describe('guardrails', () => {
     try {
       const res = await cancel.sendEmail({ to: ['friend@example.com'], bcc: ['hidden@example.net'], subject: 'Needs a click', body: 'x' });
       expect(res).toMatchObject({ sent: false, cancelled: true, reason: 'cancelled' });
-      expect(seen[0]).toContain('Bcc: hidden@example.net');
+      expect(seen[0]).toContain('Bcc (1): hidden@example.net');
       expect(seen[0]).toContain('Subject: Needs a click');
       await expectMailError(unavailable.sendEmail({ to: ['friend@example.com'], subject: 'x', body: 'x' }), 'CONFIRM_UNAVAILABLE', /MAIL_CONFIRM_DIALOG=false/);
       expect(listSidecars().length).toBe(before);
@@ -326,7 +326,7 @@ describe('authentication failures', () => {
     const bad = createTestService(dirs, { ICLOUD_APP_PASSWORD: 'wrong-password' });
     try {
       const err = await expectMailError(bad.sendEmail({ to: ['friend@example.com'], subject: 'x', body: 'x' }), 'AUTH', /SMTP .*rejected the login/);
-      expect(err.message).toMatch(/full iCloud email address/);
+      expect(err.message).toMatch(/full iCloud Mail address/);
       expect(err.message).not.toContain('wrong-password');
     } finally {
       await bad.close();

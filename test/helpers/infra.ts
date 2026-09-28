@@ -50,6 +50,14 @@ export function portOpen(port: number, timeoutMs = 500): Promise<boolean> {
   });
 }
 
+/**
+ * Whether profile-dependent tests may be skipped: only when the profile is down AND the run opted
+ * in with ALLOW_PROFILE_SKIP=1 (the integration globalSetup otherwise starts the profiles or fails).
+ */
+export function skipProfile(up: boolean): boolean {
+  return !up && process.env['ALLOW_PROFILE_SKIP'] === '1';
+}
+
 export interface ManifestMessage {
   uid: number;
   key: string;

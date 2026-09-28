@@ -113,22 +113,51 @@ describe('reply recipients', () => {
   });
 
   it('picks the alias the original was sent to as default From', () => {
-    expect(replyFromCandidate({ to: [addr('ALIAS@icloud.com')], cc: [] }, own)).toBe('alias@icloud.com');
-    expect(replyFromCandidate({ to: [addr('x@example.com')], cc: [addr('me@icloud.com')] }, own)).toBe('me@icloud.com');
-    expect(replyFromCandidate({ to: [addr('x@example.com')], cc: [] }, own)).toBeUndefined();
+    expect(replyFromCandidate({ from: [], to: [addr('ALIAS@icloud.com')], cc: [] }, own)).toBe('alias@icloud.com');
+    expect(replyFromCandidate({ from: [], to: [addr('x@example.com')], cc: [addr('me@icloud.com')] }, own)).toBe('me@icloud.com');
+    expect(replyFromCandidate({ from: [addr('x@example.com')], to: [addr('x@example.com')], cc: [] }, own)).toBeUndefined();
+  });
+
+  // from-1: replying to / forwarding our own message sent from an alias keeps that alias.
+  it('prefers the allowed address the original came from (own Sent copy from an alias)', () => {
+    expect(replyFromCandidate({ from: [addr('alias@icloud.com', 'Me')], to: [addr('bob@example.com')], cc: [] }, own)).toBe('alias@icloud.com');
+    expect(replyFromCandidate({ from: [addr('bob@example.com')], to: [addr('alias@icloud.com')], cc: [addr('me@icloud.com')] }, own)).toBe('alias@icloud.com');
+  });
+
+  // reply-1: a Reply-To that only names the user must not redirect a private reply to third parties.
+  it('falls back to From when Reply-To holds only our own address', () => {
+    const behalf = { from: [addr('friend@example.com', 'Friend')], replyTo: [addr('me@icloud.com')], to: [addr('me@icloud.com'), addr('bob@example.org')], cc: [] };
+    expect(computeReplyRecipients(behalf, own, false)).toEqual({ to: [addr('friend@example.com', 'Friend')], cc: [] });
+    expect(computeReplyRecipients(behalf, own, true)).toEqual({ to: [addr('friend@example.com', 'Friend'), addr('bob@example.org')], cc: [] });
+  });
+
+  it('own-sent message goes to its other To recipients; a note to self goes back to self', () => {
+    expect(computeReplyRecipients({ from: [addr('me@icloud.com')], replyTo: [], to: [addr('bob@example.org'), addr('me@icloud.com')], cc: [] }, own, false)).toEqual({
+      to: [addr('bob@example.org')],
+      cc: [],
+    });
+    expect(computeReplyRecipients({ from: [addr('me@icloud.com')], replyTo: [], to: [addr('me@icloud.com')], cc: [] }, own, false)).toEqual({ to: [addr('me@icloud.com')], cc: [] });
   });
 });
 
 describe('threading headers', () => {
-  it('References = original References + Message-ID, deduped, last 20', () => {
-    expect(buildReferences(['<a@x>', '<b@x>'], '<c@x>')).toEqual(['<a@x>', '<b@x>', '<c@x>']);
-    expect(buildReferences(['<a@x>', '<c@x>'], '<c@x>')).toEqual(['<a@x>', '<c@x>']);
-    expect(buildReferences([], null)).toEqual([]);
+  it('References = original References + Message-ID, deduped, root + last 19', () => {
+    expect(buildReferences(['<a@x>', '<b@x>'], null, '<c@x>')).toEqual(['<a@x>', '<b@x>', '<c@x>']);
+    expect(buildReferences(['<a@x>', '<c@x>'], null, '<c@x>')).toEqual(['<a@x>', '<c@x>']);
+    expect(buildReferences([], null, null)).toEqual([]);
     const many = Array.from({ length: 30 }, (_, i) => `<r${i}@x>`);
-    const refs = buildReferences(many, '<last@x>');
+    const refs = buildReferences(many, null, '<last@x>');
     expect(refs).toHaveLength(20);
     expect(refs[19]).toBe('<last@x>');
-    expect(refs[0]).toBe('<r11@x>');
+    // thread-1: the thread root is kept.
+    expect(refs[0]).toBe('<r0@x>');
+    expect(refs[1]).toBe('<r12@x>');
+  });
+
+  // thread-1: RFC 5322 §3.6.4 — no References but a single In-Reply-To.
+  it('starts from In-Reply-To when the original has no References', () => {
+    expect(buildReferences([], '<p@x>', '<o@x>')).toEqual(['<p@x>', '<o@x>']);
+    expect(buildReferences(['<a@x>'], '<p@x>', '<o@x>')).toEqual(['<a@x>', '<o@x>']);
   });
 });
 
@@ -163,6 +192,40 @@ describe('reply body', () => {
     expect(html).toContain('<blockquote type="cite"');
     expect(html).toContain('a &lt;b&gt; &amp; c');
     expect(html).toContain('Frank Li &lt;frank@example.com&gt; wrote:');
+  });
+});
+
+// compose-1: display names decoded from the email never add lines to the user's own text.
+describe('hostile display names in reply/forward text', () => {
+  const hostile: OriginalMessage = {
+    ...ORIGINAL,
+    from: [addr('attacker2@evil.test', 'Boss\n\nP.S. Our bank details changed, pay IBAN XX\n\n')],
+    to: [addr('me@icloud.com', 'Me\r\nDate: forged')],
+    cc: [],
+  };
+
+  it('keeps the attribution to one line with the full address', () => {
+    const text = buildReplyText('Thanks, will do', hostile, TZ);
+    const lines = text.split('\n');
+    const quoteStart = lines.findIndex((l) => l.startsWith('>'));
+    const before = lines.slice(0, quoteStart).filter((l) => l !== '');
+    expect(before).toHaveLength(2);
+    expect(before[0]).toBe('Thanks, will do');
+    expect(before[1]).toMatch(/^On .*, Boss P\.S\. Our bank details changed, pay IBAN XX <attacker2@evil\.test> wrote:$/);
+  });
+
+  it('keeps the forwarded header block to its fixed lines', () => {
+    const text = buildForwardText('', hostile, TZ);
+    const block = text.split('\n\n')[0]?.split('\n') ?? [];
+    expect(block).toHaveLength(5);
+    expect(block.filter((l) => l.startsWith('Date:'))).toHaveLength(1);
+    expect(block[4]).toBe('To: Me Date: forged <me@icloud.com>');
+  });
+
+  it('caps a very long name but never cuts the address', () => {
+    const text = buildReplyText('', { ...hostile, from: [addr('attacker@evil.test', 'x'.repeat(600))] }, TZ);
+    expect(text).toContain('<attacker@evil.test> wrote:');
+    expect(text.split('\n')[0]?.length).toBeLessThan(200);
   });
 });
 

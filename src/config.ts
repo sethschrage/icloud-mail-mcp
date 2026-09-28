@@ -25,12 +25,21 @@ export interface Config {
   fromName: string | undefined;
   /** ICLOUD_EMAIL ∪ MAIL_FROM_ADDRESS ∪ MAIL_ALLOWED_FROM, deduplicated case-insensitively. */
   allowedFrom: string[];
+  /**
+   * Addresses that belong to the user, for reply recipients and the default reply From: the
+   * allowed From set plus, for a legacy @icloud.com/@me.com/@mac.com account, the same name at the
+   * other two domains (never used as allowed From: iCloud may refuse to send from them).
+   */
+  ownAddresses: string[];
   allowSend: boolean;
   allowPermanentDelete: boolean;
   readOnly: boolean;
   confirmDialog: boolean;
   maxSendsPerHour: number;
   maxRecipients: number;
+  /** Rolling recipient budgets across all sends (0 = unlimited); iCloud allows 1,000 recipients a day. */
+  maxRecipientsPerHour: number;
+  maxRecipientsPerDay: number;
   attachmentDir: string;
   attachFromDirs: string[];
   maxBodyChars: number;
@@ -42,7 +51,8 @@ export interface Config {
   logLevel: LogLevel;
   timezone: string;
   mailboxOverrides: Partial<Record<SpecialFolder, string>>;
-  imap: { host: string; port: number; secure: boolean };
+  /** allowPlaintext: IMAP_ALLOW_PLAINTEXT (tests only): without implicit TLS, do not require STARTTLS. */
+  imap: { host: string; port: number; secure: boolean; allowPlaintext: boolean };
   smtp: { host: string; port: number; secure: boolean; requireTLS: boolean };
   tlsCaFile: string | undefined;
 }
@@ -66,6 +76,44 @@ export interface LoadConfigOptions {
 
 export const MAX_BODY_CHARS_CEILING = 100_000;
 export const ICLOUD_MAX_RECIPIENTS = 500;
+export const ICLOUD_DOMAINS_FOR_OWN = ['icloud.com', 'me.com', 'mac.com'] as const;
+
+/**
+ * Titles of the extension settings (manifest.json user_config) for the env vars they set, so error
+ * messages name the field a Claude Desktop user actually sees, next to the env var for manual setups.
+ */
+export const SETTING_LABELS: Readonly<Record<string, string>> = {
+  ICLOUD_EMAIL: 'iCloud email address',
+  ICLOUD_APP_PASSWORD: 'App-specific password',
+  ICLOUD_IMAP_USER: 'IMAP login (optional)',
+  MAIL_FROM_ADDRESS: 'From address (optional)',
+  MAIL_FROM_NAME: 'Your name (optional)',
+  MAIL_ALLOWED_FROM: 'Other From addresses (optional)',
+  MAIL_ALLOW_SEND: 'Allow sending',
+  MAIL_ALLOW_PERMANENT_DELETE: 'Allow permanent delete',
+  MAIL_READ_ONLY: 'Read-only mode',
+  MAIL_CONFIRM_DIALOG: 'Confirm on my Mac before sending or permanently deleting',
+  MAIL_ATTACHMENT_DIR: 'Attachment download folder',
+  MAIL_ATTACH_FROM_DIRS: 'Attach files from',
+  MAIL_MAX_BODY_CHARS: 'Maximum email length shown to Claude',
+  MAIL_MAX_SENDS_PER_HOUR: 'Maximum emails sent per hour',
+  MAIL_MAX_RECIPIENTS_PER_HOUR: 'Maximum recipients per hour',
+  MAIL_MAX_RECIPIENTS_PER_DAY: 'Maximum recipients per day',
+  MAIL_SENT_MAILBOX: 'Sent folder (optional)',
+  MAIL_TRASH_MAILBOX: 'Trash folder (optional)',
+  MAIL_DRAFTS_MAILBOX: 'Drafts folder (optional)',
+  MAIL_ARCHIVE_MAILBOX: 'Archive folder (optional)',
+  MAIL_JUNK_MAILBOX: 'Junk folder (optional)',
+};
+
+/** `"<settings title>" (ENV_VAR)` for env vars that have a settings field, else just the env var. */
+export function settingName(envVar: string): string {
+  const label = SETTING_LABELS[envVar];
+  return label ? `"${label}" (${envVar})` : envVar;
+}
+
+/** Values of MAIL_ATTACH_FROM_DIRS / --attach-from-dirs that mean "no attachment folders at all". */
+const NO_FOLDERS = new Set(['none', 'off']);
 
 const PLACEHOLDER = /^\$\{([^}]+)\}$/;
 
@@ -173,25 +221,40 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     if (v === undefined) return def;
     const b = parseBoolean(v);
     if (b === undefined) {
-      errors.push(`${name} must be true/false (also accepted: 1/0, yes/no); got "${v}".`);
+      errors.push(`${settingName(name)} must be true/false (also accepted: 1/0, yes/no); got "${v}".`);
       return def;
     }
     return b;
   };
-  const int = (name: string, def: number, min: number, max: number): number => {
+  /**
+   * Whole-number setting. Strict (ports): anything but digits is an error. Lenient (limits the
+   * settings form sends, e.g. "1500.5"): any finite number is rounded and clamped with a warning,
+   * so one odd value never disables every tool; only non-numeric text is an error.
+   */
+  const int = (name: string, def: number, min: number, max: number, opts: { lenient?: boolean } = {}): number => {
     const v = str(name);
     if (v === undefined) return def;
-    if (!/^-?\d+$/.test(v)) {
-      errors.push(`${name} must be a whole number; got "${v}".`);
+    const label = settingName(name);
+    let n: number;
+    if (/^-?\d+$/.test(v)) {
+      n = Number(v);
+    } else if (opts.lenient && Number.isFinite(Number(v))) {
+      n = Math.round(Number(v));
+      warnings.push(`${label}=${v} is not a whole number; using ${n}.`);
+    } else {
+      errors.push(`${label} must be a whole number; got "${v}".`);
       return def;
     }
-    const n = Number(v);
     if (n < min) {
-      errors.push(`${name} must be at least ${min}; got ${n}.`);
+      if (opts.lenient) {
+        warnings.push(`${label}=${n} is below the minimum ${min}; using ${min}.`);
+        return min;
+      }
+      errors.push(`${label} must be at least ${min}; got ${n}.`);
       return def;
     }
     if (n > max) {
-      warnings.push(`${name}=${n} is above the maximum ${max}; using ${max}.`);
+      warnings.push(`${label}=${n} is above the maximum ${max}; using ${max}.`);
       return max;
     }
     return n;
@@ -200,7 +263,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     const v = str(name);
     const expanded = expandPath(v ?? def, pathCtx);
     if (!path.isAbsolute(expanded)) {
-      errors.push(`${name} must be an absolute path (or start with ~/); got "${v}".`);
+      errors.push(`${settingName(name)} must be an absolute path (or start with ~/); got "${v}".`);
       return expandPath(def, pathCtx);
     }
     return expanded;
@@ -208,7 +271,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   const address = (name: string, value: string | undefined): string | undefined => {
     if (value === undefined) return undefined;
     if (!isValidEmailAddress(value)) {
-      errors.push(`${name} is not a valid email address: "${value}".`);
+      errors.push(`${settingName(name)} is not a valid email address: "${value}".`);
       return undefined;
     }
     return value;
@@ -219,7 +282,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   let email = '';
   if (emailRaw === undefined) {
     errors.push(
-      'ICLOUD_EMAIL is not set. Set it to your iCloud Mail address (for example you@icloud.com) in the extension settings or the server env.',
+      'ICLOUD_EMAIL is not set. Set it to your iCloud Mail address (for example you@icloud.com) as "iCloud email address" in the extension settings, or in the server env.',
     );
   } else {
     email = address('ICLOUD_EMAIL', emailRaw) ?? '';
@@ -228,7 +291,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   // Passed exactly as given (with or without hyphens); only surrounding whitespace from pasting is dropped.
   const password = str('ICLOUD_APP_PASSWORD');
   const fromAddress = address('MAIL_FROM_ADDRESS', str('MAIL_FROM_ADDRESS')) ?? email;
-  const smtpUser = str('ICLOUD_SMTP_USER') ?? email;
+  const imapUser = str('ICLOUD_IMAP_USER');
+  // A full address in the IMAP login (the @icloud.com login of a custom-domain user) is the SMTP
+  // login too; the settings form has no separate SMTP login field.
+  const smtpUser = str('ICLOUD_SMTP_USER') ?? (imapUser && isValidEmailAddress(imapUser) ? imapUser : email);
 
   const allowedFrom: string[] = [];
   const pushAllowed = (a: string | undefined): void => {
@@ -238,14 +304,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   pushAllowed(email || undefined);
   pushAllowed(fromAddress || undefined);
   for (const a of parseList(env['MAIL_ALLOWED_FROM'])) pushAllowed(address('MAIL_ALLOWED_FROM', a));
+  const ownAddresses = [...allowedFrom];
+  const pushOwn = (a: string): void => {
+    if (!ownAddresses.some((x) => x.toLowerCase() === a.toLowerCase())) ownAddresses.push(a);
+  };
+  for (const a of [email, imapUser ?? '']) {
+    const at = a.lastIndexOf('@');
+    if (at <= 0) continue;
+    const domain = a.slice(at + 1).toLowerCase();
+    if (!(ICLOUD_DOMAINS_FOR_OWN as readonly string[]).includes(domain)) continue;
+    for (const d of ICLOUD_DOMAINS_FOR_OWN) pushOwn(`${a.slice(0, at)}@${d}`);
+  }
 
   // --- guardrails -----------------------------------------------------------------------------
   const readOnly = bool('MAIL_READ_ONLY', false);
   const allowSend = bool('MAIL_ALLOW_SEND', true);
   const allowPermanentDelete = bool('MAIL_ALLOW_PERMANENT_DELETE', false);
   const confirmDialog = bool('MAIL_CONFIRM_DIALOG', false);
-  const maxSendsPerHour = int('MAIL_MAX_SENDS_PER_HOUR', 30, 0, 100_000);
-  const maxRecipients = int('MAIL_MAX_RECIPIENTS', 50, 1, ICLOUD_MAX_RECIPIENTS);
+  const maxSendsPerHour = int('MAIL_MAX_SENDS_PER_HOUR', 30, 0, 100_000, { lenient: true });
+  const maxRecipients = int('MAIL_MAX_RECIPIENTS', 50, 1, ICLOUD_MAX_RECIPIENTS, { lenient: true });
+  const maxRecipientsPerHour = int('MAIL_MAX_RECIPIENTS_PER_HOUR', 150, 0, 100_000, { lenient: true });
+  const maxRecipientsPerDay = int('MAIL_MAX_RECIPIENTS_PER_DAY', 500, 0, 100_000, { lenient: true });
 
   // --- files ----------------------------------------------------------------------------------
   const attachmentDir = pathValue('MAIL_ATTACHMENT_DIR', '~/Downloads/iCloud Mail Attachments');
@@ -256,6 +335,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   else if (attachFromRaw !== undefined) attachFromSource = { name: 'MAIL_ATTACH_FROM_DIRS entries', dirs: parseList(attachFromRaw) };
   else attachFromSource = { name: 'Default attachment folders', dirs: ['~/Desktop', '~/Documents', '~/Downloads'] };
   const attachFromDirs: string[] = [];
+  // "none" (alone) switches local-file attachments off entirely; an empty list cannot, because
+  // Claude Desktop sends nothing for a cleared folder setting and the defaults then apply.
+  if (attachFromSource.dirs.length === 1 && NO_FOLDERS.has((attachFromSource.dirs[0] ?? '').toLowerCase())) attachFromSource = { ...attachFromSource, dirs: [] };
   for (const d of attachFromSource.dirs) {
     const expanded = expandPath(d, pathCtx);
     if (!path.isAbsolute(expanded)) {
@@ -265,8 +347,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     if (!attachFromDirs.includes(expanded)) attachFromDirs.push(expanded);
   }
 
-  const maxBodyChars = int('MAIL_MAX_BODY_CHARS', 20_000, 1, MAX_BODY_CHARS_CEILING);
-  const maxAttachmentMb = int('MAIL_MAX_ATTACHMENT_MB', 25, 1, 1024);
+  const maxBodyChars = int('MAIL_MAX_BODY_CHARS', 20_000, 1, MAX_BODY_CHARS_CEILING, { lenient: true });
+  const maxAttachmentMb = int('MAIL_MAX_ATTACHMENT_MB', 25, 1, 1024, { lenient: true });
 
   const auditRaw = str('MAIL_AUDIT_LOG');
   let auditLog: string | null;
@@ -274,7 +356,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   else auditLog = pathValue('MAIL_AUDIT_LOG', defaultAuditLogPath(platform, home));
 
   const saveSentCopy = bool('MAIL_SAVE_SENT_COPY', true);
-  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', 120, 5, 3600);
+  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', 120, 5, 3600, { lenient: true });
 
   const logLevelRaw = str('MAIL_LOG_LEVEL');
   let logLevel: LogLevel = 'warn';
@@ -310,7 +392,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     host: str('IMAP_HOST') ?? 'imap.mail.me.com',
     port: int('IMAP_PORT', 993, 1, 65_535),
     secure: bool('IMAP_SECURE', true),
+    allowPlaintext: bool('IMAP_ALLOW_PLAINTEXT', false),
   };
+  if (!imap.secure && imap.allowPlaintext) {
+    warnings.push('IMAP_SECURE=false with IMAP_ALLOW_PLAINTEXT=true: the IMAP login (with the app-specific password) may be sent unencrypted. Use this only for local testing.');
+  }
   const smtpSecure = bool('SMTP_SECURE', false);
   const smtp = {
     host: str('SMTP_HOST') ?? 'smtp.mail.me.com',
@@ -318,6 +404,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     secure: smtpSecure,
     requireTLS: smtpSecure ? false : bool('SMTP_REQUIRE_TLS', true),
   };
+  if (!smtp.secure && !smtp.requireTLS) {
+    warnings.push('SMTP_REQUIRE_TLS=false: the SMTP login (with the app-specific password) may be sent unencrypted if the server does not offer STARTTLS. Use this only for local testing.');
+  }
   const caRaw = str('MAIL_TLS_CA_FILE');
   const tlsCaFile = caRaw === undefined ? undefined : expandPath(caRaw, pathCtx);
 
@@ -325,17 +414,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     email,
     password,
     keychainService: str('ICLOUD_KEYCHAIN_SERVICE') ?? 'icloud-mail-mcp',
-    imapUser: str('ICLOUD_IMAP_USER'),
+    imapUser,
     smtpUser,
     fromAddress,
     fromName: str('MAIL_FROM_NAME'),
     allowedFrom,
+    ownAddresses,
     allowSend,
     allowPermanentDelete,
     readOnly,
     confirmDialog,
     maxSendsPerHour,
     maxRecipients,
+    maxRecipientsPerHour,
+    maxRecipientsPerDay,
     attachmentDir,
     attachFromDirs,
     maxBodyChars,

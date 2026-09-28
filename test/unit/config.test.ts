@@ -55,7 +55,7 @@ describe('booleans', () => {
 
   it('reports invalid booleans as config errors (fail closed)', () => {
     const { errors, config } = load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_READ_ONLY: 'sure' });
-    expect(errors).toEqual([expect.stringMatching(/MAIL_READ_ONLY must be true\/false/)]);
+    expect(errors).toEqual([expect.stringMatching(/"Read-only mode" \(MAIL_READ_ONLY\) must be true\/false/)]);
     expect(config.readOnly).toBe(false);
   });
 });
@@ -112,7 +112,7 @@ describe('required values and validation', () => {
   });
 
   it('rejects invalid email addresses', () => {
-    expect(load({ ICLOUD_EMAIL: 'not an email' }).errors[0]).toMatch(/ICLOUD_EMAIL is not a valid email address/);
+    expect(load({ ICLOUD_EMAIL: 'not an email' }).errors[0]).toMatch(/\(ICLOUD_EMAIL\) is not a valid email address/);
     expect(load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_ALLOWED_FROM: 'ok@example.com, bad@' }).errors[0]).toMatch(/MAIL_ALLOWED_FROM/);
   });
 
@@ -121,8 +121,47 @@ describe('required values and validation', () => {
     expect(r.config.maxBodyChars).toBe(100_000);
     expect(r.config.maxRecipients).toBe(500);
     expect(r.warnings).toHaveLength(2);
-    expect(r.errors).toEqual([expect.stringMatching(/MAIL_MAX_SENDS_PER_HOUR must be a whole number/)]);
+    expect(r.errors).toEqual([expect.stringMatching(/\(MAIL_MAX_SENDS_PER_HOUR\) must be a whole number/)]);
     expect(load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_MAX_SENDS_PER_HOUR: '0' }).config.maxSendsPerHour).toBe(0);
+  });
+
+  // integ-8: a decimal from the settings form never disables every tool.
+  it('rounds and clamps non-integer limit settings with a warning; ports stay strict', () => {
+    const a = load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_MAX_BODY_CHARS: '1500.5' });
+    expect(a.errors).toEqual([]);
+    expect(a.config.maxBodyChars).toBe(1501);
+    expect(a.warnings.join(' ')).toMatch(/Maximum email length shown to Claude/);
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_MAX_BODY_CHARS: '2e4' }).config.maxBodyChars).toBe(20_000);
+    const low = load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_MAX_RECIPIENTS: '0' });
+    expect(low.config.maxRecipients).toBe(1);
+    expect(low.errors).toEqual([]);
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_MAX_BODY_CHARS: 'abc' }).errors[0]).toMatch(/whole number/);
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com', IMAP_PORT: '993.5' }).errors[0]).toMatch(/IMAP_PORT must be a whole number/);
+  });
+
+  // integ-3: a full address in "IMAP login" is also the SMTP login.
+  it('uses a full-address IMAP login for SMTP too', () => {
+    expect(load({ ICLOUD_EMAIL: 'jane@example.com', ICLOUD_IMAP_USER: 'jane@icloud.com' }).config.smtpUser).toBe('jane@icloud.com');
+    expect(load({ ICLOUD_EMAIL: 'jane@icloud.com', ICLOUD_IMAP_USER: 'jane' }).config.smtpUser).toBe('jane@icloud.com');
+    expect(load({ ICLOUD_EMAIL: 'jane@example.com', ICLOUD_IMAP_USER: 'jane@icloud.com', ICLOUD_SMTP_USER: 'other@icloud.com' }).config.smtpUser).toBe('other@icloud.com');
+  });
+
+  // own-1: legacy @me.com/@mac.com equivalents are own addresses, but not allowed From.
+  it('treats the @icloud.com/@me.com/@mac.com equivalents as own addresses only', () => {
+    const { config } = load({ ICLOUD_EMAIL: 'jane@icloud.com' });
+    expect(config.ownAddresses).toEqual(expect.arrayContaining(['jane@icloud.com', 'jane@me.com', 'jane@mac.com']));
+    expect(config.allowedFrom).toEqual(['jane@icloud.com']);
+    expect(load({ ICLOUD_EMAIL: 'jane@example.com' }).config.ownAddresses).toEqual(['jane@example.com']);
+  });
+
+  // docs-13: "none" switches local-file attachments off.
+  it('accepts "none" for the attachment folders', () => {
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_ATTACH_FROM_DIRS: 'none' }).config.attachFromDirs).toEqual([]);
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com' }).config.attachFromDirs).toHaveLength(3);
+  });
+
+  it('warns when SMTP TLS is not required', () => {
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com', SMTP_REQUIRE_TLS: 'false' }).warnings.join(' ')).toMatch(/SMTP_REQUIRE_TLS=false/);
   });
 
   it('validates the time zone and log level', () => {

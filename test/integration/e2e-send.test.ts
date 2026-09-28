@@ -238,7 +238,7 @@ describe('rate limit (MAIL_MAX_SENDS_PER_HOUR=1)', () => {
       sent(await limited.call('send_email', { to: ['friend@example.com'], subject: 'rate 1', body: 'x' }));
       const second = await limited.call('send_email', { to: ['friend@example.com'], subject: 'rate 2', body: 'x' });
       expect(second.isError).toBe(true);
-      expect(second.text).toMatch(/Send limit reached: at most 1 emails per hour \(MAIL_MAX_SENDS_PER_HOUR\)/);
+      expect(second.text).toMatch(/Send limit reached: at most 1 emails per hour \("Maximum emails sent per hour" \(MAIL_MAX_SENDS_PER_HOUR\)/);
       expect(second.text).toMatch(/save a draft instead/);
       const reply = await limited.call('reply_to_message', { mailbox: 'INBOX', uid: 29, body: 'x' });
       expect(reply.isError).toBe(true);

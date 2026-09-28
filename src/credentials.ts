@@ -5,7 +5,7 @@
  * only on darwin. The resolved password is cached for the process lifetime and registered with the
  * logger's redaction list.
  */
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import type { Config } from './config.js';
 import { MailError } from './errors.js';
 import { localPartOf } from './smtp/address.js';
@@ -17,20 +17,45 @@ export const APP_PASSWORD_HELP =
   'security add-generic-password -s icloud-mail-mcp -a <your iCloud email> -U -w';
 
 export type ExecFileResult = { stdout: string; stderr: string; code: number | null; error?: NodeJS.ErrnoException & { killed?: boolean } };
-export type ExecFileFn = (file: string, args: readonly string[], options: { timeoutMs: number }) => Promise<ExecFileResult>;
+export type ExecFileFn = (file: string, args: readonly string[], options: { timeoutMs: number; signal?: AbortSignal | undefined }) => Promise<ExecFileResult>;
 
-/** Default executor: node's execFile without a shell; never rejects (errors are in the result). */
-export const defaultExecFile: ExecFileFn = (file, args, { timeoutMs }) =>
+/** Child processes still running (the confirmation dialog, the Keychain reader, xattr). */
+const liveChildren = new Set<ChildProcess>();
+
+/** Kill every child process still running (on shutdown, so no orphaned dialog stays on screen). */
+export function killChildProcesses(): void {
+  for (const child of liveChildren) {
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      // already gone
+    }
+  }
+  liveChildren.clear();
+}
+
+/**
+ * Default executor: node's execFile without a shell; never rejects (errors are in the result). An
+ * aborted `signal` kills the child (the result's error is then an AbortError).
+ */
+export const defaultExecFile: ExecFileFn = (file, args, { timeoutMs, signal }) =>
   new Promise((resolve) => {
-    execFile(file, [...args], { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
-      if (error) {
-        const e = error as NodeJS.ErrnoException & { killed?: boolean; code?: string | number };
-        const code = typeof e.code === 'number' ? e.code : null;
-        resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code, error: e });
-        return;
-      }
-      resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code: 0 });
-    });
+    const child = execFile(
+      file,
+      [...args],
+      { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 1024 * 1024, windowsHide: true, ...(signal ? { signal } : {}) },
+      (error, stdout, stderr) => {
+        liveChildren.delete(child);
+        if (error) {
+          const e = error as NodeJS.ErrnoException & { killed?: boolean; code?: string | number };
+          const code = typeof e.code === 'number' ? e.code : null;
+          resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code, error: e });
+          return;
+        }
+        resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), code: 0 });
+      },
+    );
+    liveChildren.add(child);
   });
 
 export interface CredentialOptions {

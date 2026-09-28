@@ -9,10 +9,10 @@ import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FetchMessageObject, ImapFlow, MessageAddressObject, MessageStructureObject } from 'imapflow';
 import { MailError } from '../errors.js';
-import { formatDateISO, formatSize, htmlToPlainText, makeSnippet, stripHtmlCheap, toValidDate } from '../format.js';
-import { createUniqueFile, fallbackAttachmentName, sanitizeFilename } from '../safety/paths.js';
+import { decodedSizeEstimate, formatDateISO, formatSize, htmlToPlainText, makeSnippet, stripHtmlCheap, toValidDate } from '../format.js';
+import { attachmentSaveError, createUniqueFile, fallbackAttachmentName, sanitizeFilename } from '../safety/paths.js';
 import { sanitizeInline } from '../safety/untrusted.js';
-import { formatAddress, type EmailAddress } from '../smtp/address.js';
+import { displayName, formatAddressForDisplay, type EmailAddress } from '../smtp/address.js';
 import { flagState, type FlagColor, type FlagState } from './flags.js';
 import {
   collectAttachments,
@@ -26,24 +26,34 @@ import {
   type AttachmentInfo,
   type TextPartRef,
 } from './mime.js';
+import { toSequenceSet } from './uids.js';
 
+/**
+ * Search/thread summary (SPEC §5). To keep results small, `cc` appears only when non-empty,
+ * `flagged`, `flag_color`, `answered` and `draft` only when set, and at most SUMMARY_MAX_ADDRESSES
+ * To/Cc addresses are listed (`to_count`/`cc_count` then give the full number; get_message shows all).
+ */
 export interface MessageSummary {
   mailbox: string;
   uid: number;
   date: string | null;
   from: string;
   to: string[];
-  cc: string[];
+  to_count?: number;
+  cc?: string[];
+  cc_count?: number;
   subject: string;
   unread: boolean;
-  flagged: boolean;
-  flag_color: FlagColor | null;
-  answered: boolean;
-  draft: boolean;
+  flagged?: true;
+  flag_color?: FlagColor;
+  answered?: true;
+  draft?: true;
   has_attachments: boolean;
   size: string;
   snippet?: string;
 }
+
+export const SUMMARY_MAX_ADDRESSES = 5;
 
 /** Summary plus the data needed for merging and threading (not part of tool output). */
 export interface SummaryRecord {
@@ -61,12 +71,21 @@ export const SNIPPET_MAX_BYTES_PLAIN = 2048;
 /** HTML parts often start with a long <head>/<style>; fetch a little more so the snippet has text. */
 export const SNIPPET_MAX_BYTES_HTML = 6144;
 
-function addressList(list: MessageAddressObject[] | undefined): EmailAddress[] {
-  return (list ?? []).map((a) => ({ name: a.name ?? '', address: a.address ?? '' })).filter((a) => a.address || a.name);
+/**
+ * Envelope addresses with display names made safe once, for every consumer (display, reply
+ * recipients, attribution lines): no CR/LF from encoded-words, no invisible characters, capped.
+ */
+export function addressList(list: MessageAddressObject[] | undefined): EmailAddress[] {
+  return (list ?? []).map((a) => ({ name: displayName(a.name ?? '', 256), address: (a.address ?? '').trim() })).filter((a) => a.address || a.name);
+}
+
+/** Addresses for display: the address is never cut, only the (sanitised) name is capped. */
+export function renderAddress(a: EmailAddress): string {
+  return sanitizeInline(formatAddressForDisplay(a, 100), 2000);
 }
 
 function renderAddresses(list: MessageAddressObject[] | undefined): string[] {
-  return addressList(list).map((a) => sanitizeInline(formatAddress(a), 500));
+  return addressList(list).map(renderAddress);
 }
 
 export function messageTime(msg: Pick<FetchMessageObject, 'envelope' | 'internalDate'>): number {
@@ -79,23 +98,47 @@ export function toSummaryRecord(mailbox: string, msg: FetchMessageObject, timeZo
   const flags = msg.flags ?? new Set<string>();
   const state = flagState(flags);
   const subject = msg.envelope?.subject;
+  const to = renderAddresses(msg.envelope?.to);
+  const cc = renderAddresses(msg.envelope?.cc);
+  const summary: MessageSummary = {
+    mailbox,
+    uid: msg.uid,
+    date: time ? formatDateISO(new Date(time), timeZone) : null,
+    from: renderAddresses(msg.envelope?.from)[0] ?? '',
+    to: to.slice(0, SUMMARY_MAX_ADDRESSES),
+    subject: subject ? sanitizeInline(subject, 1000) : '(no subject)',
+    unread: state.unread,
+    has_attachments: hasRealAttachments(msg.bodyStructure),
+    size: formatSize(msg.size),
+  };
+  if (to.length > SUMMARY_MAX_ADDRESSES) summary.to_count = to.length;
+  if (cc.length) summary.cc = cc.slice(0, SUMMARY_MAX_ADDRESSES);
+  if (cc.length > SUMMARY_MAX_ADDRESSES) summary.cc_count = cc.length;
+  if (state.flagged) summary.flagged = true;
+  if (state.flag_color) summary.flag_color = state.flag_color;
+  if (state.answered) summary.answered = true;
+  if (state.draft) summary.draft = true;
+  // Keep a stable key order (snippet last), as before.
+  const ordered: MessageSummary = {
+    mailbox: summary.mailbox,
+    uid: summary.uid,
+    date: summary.date,
+    from: summary.from,
+    to: summary.to,
+    ...(summary.to_count !== undefined ? { to_count: summary.to_count } : {}),
+    ...(summary.cc ? { cc: summary.cc } : {}),
+    ...(summary.cc_count !== undefined ? { cc_count: summary.cc_count } : {}),
+    subject: summary.subject,
+    unread: summary.unread,
+    ...(summary.flagged ? { flagged: true as const } : {}),
+    ...(summary.flag_color ? { flag_color: summary.flag_color } : {}),
+    ...(summary.answered ? { answered: true as const } : {}),
+    ...(summary.draft ? { draft: true as const } : {}),
+    has_attachments: summary.has_attachments,
+    size: summary.size,
+  };
   return {
-    summary: {
-      mailbox,
-      uid: msg.uid,
-      date: time ? formatDateISO(new Date(time), timeZone) : null,
-      from: renderAddresses(msg.envelope?.from)[0] ?? '',
-      to: renderAddresses(msg.envelope?.to),
-      cc: renderAddresses(msg.envelope?.cc),
-      subject: subject ? sanitizeInline(subject, 1000) : '(no subject)',
-      unread: state.unread,
-      flagged: state.flagged,
-      flag_color: state.flag_color,
-      answered: state.answered,
-      draft: state.draft,
-      has_attachments: hasRealAttachments(msg.bodyStructure),
-      size: formatSize(msg.size),
-    },
+    summary: ordered,
     time,
     messageId: msg.envelope?.messageId ?? null,
     inReplyTo: msg.envelope?.inReplyTo ?? null,
@@ -119,29 +162,11 @@ export async function fetchSummaryRecords(
   options: { snippets: boolean; timeZone: string },
 ): Promise<SummaryRecord[]> {
   if (uids.length === 0) return [];
-  const messages = await client.fetchAll([...uids], { ...SUMMARY_QUERY }, { uid: true });
+  const messages = await client.fetchAll(toSequenceSet(uids), { ...SUMMARY_QUERY }, { uid: true });
   const byUid = new Map(messages.map((m) => [m.uid, m]));
   const ordered = uids.map((u) => byUid.get(u)).filter((m): m is FetchMessageObject => m !== undefined);
   const records = ordered.map((m) => toSummaryRecord(mailbox, m, options.timeZone));
   if (options.snippets) await attachSnippets(client, ordered, records);
-  return records;
-}
-
-/** Fetch summaries by a sequence range computed from EXISTS (no-criteria fast path). */
-export async function fetchSummaryRecordsBySeq(
-  client: ImapFlow,
-  mailbox: string,
-  seqFrom: number,
-  seqTo: number,
-  options: { snippets: boolean; timeZone: string },
-): Promise<SummaryRecord[]> {
-  if (seqTo < seqFrom || seqFrom < 1) return [];
-  // Sequence numbers here come from the server's own EXISTS count, never from user input.
-  const messages = await client.fetchAll(`${seqFrom}:${seqTo}`, { ...SUMMARY_QUERY });
-  const live = messages.filter((m) => !(m.flags && [...m.flags].some((f) => f.toLowerCase() === '\\deleted')));
-  live.sort((a, b) => b.uid - a.uid);
-  const records = live.map((m) => toSummaryRecord(mailbox, m, options.timeZone));
-  if (options.snippets) await attachSnippets(client, live, records);
   return records;
 }
 
@@ -165,7 +190,7 @@ export async function attachSnippets(client: ImapFlow, messages: readonly FetchM
   const raw = new Map<number, Buffer>();
   for (const [key, uids] of groups) {
     const [part = 'TEXT', maxStr = '2048'] = key.split('|');
-    const fetched = await client.fetchAll(uids, { uid: true, bodyParts: [{ key: part, maxLength: Number(maxStr) }] }, { uid: true });
+    const fetched = await client.fetchAll(toSequenceSet(uids), { uid: true, bodyParts: [{ key: part, maxLength: Number(maxStr) }] }, { uid: true });
     for (const m of fetched) {
       const buf = m.bodyParts?.get(part.toLowerCase());
       if (buf) raw.set(m.uid, buf);
@@ -328,6 +353,9 @@ export async function fetchFullMessage(
 
   const time = messageTime(msg);
   const env = msg.envelope;
+  // The IMAP ENVELOPE copies From into reply-to when the header is absent; only report a Reply-To
+  // the message really has, so a differing one (a phishing sign) stands out.
+  const hasReplyToHeader = (headers.get('reply-to') ?? []).some((v) => v.trim() !== '');
   const refs = headers.get('references')?.flatMap((v) => extractMessageIds(v)) ?? [];
   const inReplyTo = env?.inReplyTo ? (extractMessageIds(env.inReplyTo)[0] ?? env.inReplyTo) : (extractMessageIds(headers.get('in-reply-to')?.[0])[0] ?? null);
   const messageId = env?.messageId ? (extractMessageIds(env.messageId)[0] ?? env.messageId) : (extractMessageIds(headers.get('message-id')?.[0])[0] ?? null);
@@ -341,7 +369,7 @@ export async function fetchFullMessage(
     addresses: {
       from: addressList(env?.from),
       sender: addressList(env?.sender),
-      replyTo: addressList(env?.replyTo),
+      replyTo: hasReplyToHeader ? addressList(env?.replyTo) : [],
       to: addressList(env?.to),
       cc: addressList(env?.cc),
       bcc: addressList(env?.bcc),
@@ -365,15 +393,16 @@ export async function fetchFullMessage(
 // Attachments
 // ---------------------------------------------------------------------------------------------
 
-/** Rough decoded size from the encoded BODYSTRUCTURE size. */
+/** Decoded size estimated from the encoded BODYSTRUCTURE size (see decodedSizeEstimate). */
 export function estimateDecodedSize(att: Pick<AttachmentInfo, 'size'>, encoding: string | undefined): number {
-  const size = att.size ?? 0;
-  return (encoding ?? '').toLowerCase() === 'base64' ? Math.floor((size * 3) / 4) : size;
+  return decodedSizeEstimate(att.size ?? 0, encoding);
 }
 
 export interface ResolvedPart {
   node: MessageStructureObject;
   info: AttachmentInfo;
+  /** Message-ID of the message the part belongs to. */
+  messageId: string | null;
 }
 
 /** Validate `part` against the message's BODYSTRUCTURE (exists, not a multipart container). */
@@ -381,7 +410,7 @@ export async function resolveAttachmentPart(client: ImapFlow, mailbox: string, u
   if (!/^\d+(\.\d+)*$/.test(part)) {
     throw new MailError('INVALID_INPUT', `Invalid part "${part}". Use a part number such as "2" or "1.2" from get_message's attachment list.`);
   }
-  const msg = await client.fetchOne(String(uid), { uid: true, bodyStructure: true }, { uid: true });
+  const msg = await client.fetchOne(String(uid), { uid: true, bodyStructure: true, envelope: true }, { uid: true });
   if (!msg || msg.uid !== uid || !msg.bodyStructure) throw messageNotFound(mailbox, uid);
   const node = findPart(msg.bodyStructure, part);
   if (!node) {
@@ -397,10 +426,12 @@ export async function resolveAttachmentPart(client: ImapFlow, mailbox: string, u
     filename: null,
     content_type: (node.type || 'application/octet-stream').toLowerCase(),
     size: typeof node.size === 'number' ? node.size : null,
+    encoding: (node.encoding ?? '7bit').toLowerCase(),
     inline: false,
     content_id: node.id ?? null,
   };
-  return { node, info };
+  const messageId = msg.envelope?.messageId ? (extractMessageIds(msg.envelope.messageId)[0] ?? msg.envelope.messageId) : null;
+  return { node, info, messageId };
 }
 
 export interface DownloadedFile {
@@ -408,8 +439,14 @@ export interface DownloadedFile {
   filename: string;
   size: number;
   content_type: string;
-  /** charset parameter of the part, if any (attachments are saved undecoded). */
+  /**
+   * Charset of the saved bytes. imapflow converts inline (or disposition-less) text/plain and
+   * text/html parts to UTF-8 while downloading (and then reports 'utf-8'); disposition=attachment
+   * parts are saved as the original bytes in their declared charset.
+   */
   charset: string | null;
+  /** Message-ID of the message the attachment belongs to. */
+  messageId: string | null;
   /** File content when it is at most `captureUpTo` bytes. */
   content?: Buffer;
 }
@@ -449,7 +486,7 @@ export async function downloadPartToDir(
   part: string,
   options: { dir: string; maxBytes: number; captureUpTo?: number },
 ): Promise<DownloadedFile> {
-  const { node, info } = await resolveAttachmentPart(client, mailbox, uid, part);
+  const { node, info, messageId } = await resolveAttachmentPart(client, mailbox, uid, part);
   const estimate = estimateDecodedSize(info, node.encoding);
   if (estimate > options.maxBytes) {
     throw new MailError(
@@ -470,7 +507,9 @@ export async function downloadPartToDir(
       filename: file.path.split(/[\\/]/).pop() ?? filename,
       size: limiter.total,
       content_type: info.content_type,
-      charset: node.parameters?.['charset'] ?? null,
+      // What imapflow actually delivered (it converts inline text parts to UTF-8).
+      charset: dl.meta?.charset ?? node.parameters?.['charset'] ?? null,
+      messageId,
     };
     if (limiter.captured) result.content = Buffer.concat(limiter.captured);
     return result;
@@ -480,16 +519,39 @@ export async function downloadPartToDir(
       await file.handle.close().catch(() => undefined);
       await unlink(file.path).catch(() => undefined);
     }
-    throw err;
+    // A local file-system problem (macOS privacy denial, full disk, bad folder) is not an IMAP error.
+    throw attachmentSaveError(err, options.dir) ?? err;
   }
 }
 
 export interface AttachmentBuffer {
   filename: string;
+  /** Content-Type with the parameters that matter for the recipient (charset, method). */
   contentType: string;
   content: Buffer;
   cid: string | null;
   inline: boolean;
+}
+
+const SAFE_CHARSET = /^[A-Za-z0-9._:+-]{1,40}$/;
+const SAFE_METHOD = /^[A-Za-z-]{1,20}$/;
+
+/**
+ * Content-Type for re-attaching a part: the bare type plus `charset` for text (what imapflow
+ * delivered: 'utf-8' after it converted an inline text part, else the original charset) and
+ * `method` for calendar invitations. format=flowed is not carried: imapflow already unwrapped it.
+ */
+export function forwardedContentType(bare: string, node: MessageStructureObject | null, deliveredCharset: string | undefined): string {
+  const params: string[] = [];
+  if (bare.startsWith('text/')) {
+    const cs = deliveredCharset ?? node?.parameters?.['charset'];
+    if (cs && SAFE_CHARSET.test(cs)) params.push(`charset=${cs.toLowerCase()}`);
+  }
+  if (bare === 'text/calendar') {
+    const method = node?.parameters?.['method'];
+    if (method && SAFE_METHOD.test(method)) params.push(`method=${method.toUpperCase()}`);
+  }
+  return [bare, ...params].join('; ');
 }
 
 /**
@@ -501,7 +563,7 @@ export async function fetchAttachmentBuffers(client: ImapFlow, mailbox: string, 
   if (!msg || msg.uid !== uid || !msg.bodyStructure) throw messageNotFound(mailbox, uid);
   const root = msg.bodyStructure;
   const atts = collectAttachments(root);
-  const estimated = atts.reduce((sum, a) => sum + estimateDecodedSize(a, findPart(root, a.part)?.encoding), 0);
+  const estimated = atts.reduce((sum, a) => sum + estimateDecodedSize(a, a.encoding), 0);
   if (estimated > maxTotalBytes) {
     throw new MailError(
       'TOO_LARGE',
@@ -526,7 +588,53 @@ export async function fetchAttachmentBuffers(client: ImapFlow, mailbox: string, 
     used += content.length;
     const filename =
       sanitizeFilename(a.filename) ?? (a.content_type === 'message/rfc822' ? `forwarded-message-${a.part}.eml` : fallbackAttachmentName(uid, a.part, a.content_type));
-    out.push({ filename, contentType: a.content_type, content, cid: a.content_id, inline: a.inline });
+    const contentType = forwardedContentType(a.content_type, findPart(root, a.part), dl.meta?.charset);
+    out.push({ filename, contentType, content, cid: a.content_id, inline: a.inline });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Attached messages (message/rfc822)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Text of a message attached as message/rfc822 ("Forward as Attachment", bounce reports): its
+ * From/To/Cc/Date/Subject from BODYSTRUCTURE plus its text body, downloaded part by part. The
+ * caller wraps it as untrusted content.
+ */
+export async function readEmbeddedMessage(client: ImapFlow, uid: number, part: string, node: MessageStructureObject, timeZone: string): Promise<string> {
+  const env = node.envelope;
+  const lines: string[] = ['Attached message:'];
+  const push = (label: string, value: string): void => {
+    if (value) lines.push(`${label}: ${value}`);
+  };
+  if (env) {
+    push('From', addressList(env.from).map(renderAddress).join(', '));
+    push('To', addressList(env.to).map(renderAddress).join(', '));
+    push('Cc', addressList(env.cc).map(renderAddress).join(', '));
+    push('Date', formatDateISO(env.date ?? null, timeZone) ?? '');
+    push('Subject', env.subject ? sanitizeInline(env.subject, 1000) : '(no subject)');
+  }
+  const child = node.childNodes?.[0];
+  const refs: TextPartRef[] = [];
+  if (child) {
+    if (isMultipart(child)) {
+      refs.push(...selectBodyParts(child));
+    } else {
+      const type = (child.type ?? '').toLowerCase();
+      if (type === 'text/plain' || type === 'text/html') {
+        // imapflow numbers a single-part embedded body like its parent; IMAP addresses it as <part>.1.
+        const sub = !child.part || child.part === part ? `${part}.1` : child.part;
+        refs.push({ part: sub, type, encoding: (child.encoding ?? '7bit').toLowerCase(), charset: child.parameters?.['charset'] ?? 'utf-8', size: child.size });
+      }
+    }
+  }
+  const texts: string[] = [];
+  for (const ref of refs) {
+    const content = await downloadText(client, uid, ref);
+    texts.push(ref.type === 'text/html' ? htmlToPlainText(content) : content.replace(/\r\n?/g, '\n'));
+  }
+  lines.push('', texts.join('\n\n').trim() || '(the attached message has no text body)');
+  return lines.join('\n');
 }

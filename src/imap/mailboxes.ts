@@ -10,7 +10,11 @@ export type SpecialUse = 'inbox' | SpecialFolder;
 
 export const SPECIAL_ORDER: readonly SpecialFolder[] = ['drafts', 'sent', 'archive', 'junk', 'trash'];
 
-/** iCloud's folder names, used when neither an override nor SPECIAL-USE/name detection finds one. */
+/**
+ * iCloud's own folder names. Without SPECIAL-USE (iCloud advertises none), a top-level folder with
+ * exactly this name wins over imapflow's name guess, which would otherwise pick e.g. an Outlook
+ * "Sent Items" or "Deleted Items" folder that sorts before Apple's folder (see computeSpecialMap).
+ */
 export const ICLOUD_DEFAULT_NAMES: Record<SpecialFolder, string> = {
   sent: 'Sent Messages',
   trash: 'Deleted Messages',
@@ -60,6 +64,11 @@ export interface MailboxInfo {
   specialUse: SpecialUse | null;
   /** What imapflow/the server reported (\Sent etc.), before our resolution. */
   serverSpecialUse: SpecialFolder | null;
+  /**
+   * Where imapflow's specialUse came from: 'extension' (a real SPECIAL-USE/XLIST attribute),
+   * 'user' (an explicit hint) or 'name' (imapflow guessed it from the folder name).
+   */
+  serverSpecialUseSource: 'user' | 'extension' | 'name' | null;
   selectable: boolean;
   noInferiors: boolean;
   hasChildren: boolean;
@@ -99,6 +108,7 @@ export function toMailboxInfo(entry: ListResponse): MailboxInfo {
     parentPath: entry.parentPath ?? '',
     specialUse: isInboxPath(entry.path) ? 'inbox' : null,
     serverSpecialUse: serverSpecial,
+    serverSpecialUseSource: serverSpecial ? (entry.specialUseSource ?? 'name') : null,
     selectable,
     noInferiors: flags.has('\\noinferiors'),
     hasChildren: flags.has('\\haschildren'),
@@ -128,28 +138,52 @@ function findByName(input: string, mailboxes: readonly MailboxInfo[]): MailboxIn
   return null;
 }
 
-/** Decide the special-folder mapping: env override > server/imapflow special-use > iCloud names. */
+/**
+ * Decide the special-folder mapping. Per kind, first match wins:
+ * 1. env override (MAIL_SENT_MAILBOX, …);
+ * 2. a real server attribute: imapflow specialUse with source 'extension' (SPECIAL-USE/XLIST) or 'user';
+ * 3. a selectable top-level folder named exactly as iCloud names it ("Sent Messages", "Deleted
+ *    Messages", "Drafts", "Junk", "Archive"), whatever imapflow guessed for it. iCloud has no
+ *    SPECIAL-USE, so imapflow guesses from names and, when several folders match one type, gives
+ *    it to the alphabetically first path: a stray "Sent Items", "Bin" or "Draft" from another
+ *    client would otherwise replace Apple's real folder (and imapflow then strips the guess from
+ *    the real one);
+ * 4. imapflow's name guess, for a selectable top-level folder only (a nested "Old Mail/Sent" or
+ *    "Clients/Trash" is a user folder, never the special one);
+ * 5. none.
+ * A mailbox is used for at most one kind.
+ */
 export function computeSpecialMap(mailboxes: readonly MailboxInfo[], overrides: Partial<Record<SpecialFolder, string>>): SpecialResolution {
   const map: SpecialMap = { inbox: mailboxes.find((m) => isInboxPath(m.path)) ?? null, sent: null, trash: null, drafts: null, junk: null, archive: null };
   const missingOverrides: Partial<Record<SpecialFolder, string>> = {};
+  const used = new Set<string>();
+  const take = (kind: SpecialFolder, m: MailboxInfo | null | undefined): boolean => {
+    if (!m) return false;
+    map[kind] = m;
+    used.add(m.path);
+    return true;
+  };
+  const free = (m: MailboxInfo): boolean => m.selectable && !used.has(m.path) && !isInboxPath(m.path);
+  // Overrides first for every kind, so a guess never claims a folder an override names.
   for (const kind of SPECIAL_ORDER) {
     const override = overrides[kind];
-    if (override) {
-      const found = findByName(override, mailboxes);
-      if (found && found !== 'ambiguous') {
-        map[kind] = found;
-        continue;
-      }
-      missingOverrides[kind] = override;
-      continue;
-    }
-    const byServer = mailboxes.find((m) => m.serverSpecialUse === kind && m.selectable);
-    if (byServer) {
-      map[kind] = byServer;
-      continue;
-    }
+    if (!override) continue;
+    const found = findByName(override, mailboxes);
+    if (found && found !== 'ambiguous') take(kind, found);
+    else missingOverrides[kind] = override;
+  }
+  const pending = SPECIAL_ORDER.filter((kind) => !overrides[kind]);
+  for (const kind of pending) {
+    take(kind, mailboxes.find((m) => free(m) && m.serverSpecialUse === kind && (m.serverSpecialUseSource === 'extension' || m.serverSpecialUseSource === 'user')));
+  }
+  for (const kind of pending) {
+    if (map[kind]) continue;
     const defaultName = fold(ICLOUD_DEFAULT_NAMES[kind]);
-    map[kind] = mailboxes.find((m) => fold(m.path) === defaultName && m.selectable) ?? null;
+    take(kind, mailboxes.find((m) => free(m) && m.parentPath === '' && fold(m.path) === defaultName));
+  }
+  for (const kind of pending) {
+    if (map[kind]) continue;
+    take(kind, mailboxes.find((m) => free(m) && m.parentPath === '' && m.serverSpecialUse === kind));
   }
   return { map, missingOverrides };
 }
@@ -209,22 +243,50 @@ export function isNotesMailbox(m: MailboxInfo): boolean {
 }
 
 export interface MailboxRegistryOptions {
+  /** How long the folder list (names, special folders) is cached (default 5 minutes). */
   ttlMs?: number;
+  /** How long message counts are cached (default 60 s). */
+  countsTtlMs?: number;
   now?: () => number;
 }
 
-interface CacheEntry {
+interface NamesEntry {
   at: number;
   mailboxes: MailboxInfo[];
   special: SpecialResolution;
 }
 
-/** Cached LIST (+ STATUS messages/unseen) for 60 s, with special-folder resolution. */
+interface CountsEntry {
+  at: number;
+  counts: Map<string, { total: number | null; unread: number | null }>;
+}
+
+interface InFlight<T> {
+  gen: number;
+  p: Promise<T>;
+}
+
+/**
+ * Cached folder list with special-folder resolution (SPEC §4), in two parts:
+ * - names (LIST only; 5 minutes): what every tool needs to resolve a mailbox name. Invalidated by
+ *   create/rename/delete, Archive auto-creation, a resolve miss or a vanished mailbox. Moves and
+ *   flag changes do not touch it, so the call after a change does not pay a full relisting;
+ * - counts (STATUS messages/unseen; 60 s): only list_mailboxes with include_counts loads them.
+ *   iCloud has no LIST-STATUS, so that is one STATUS command per folder. Moves, flag changes,
+ *   appends and mark-as-read invalidate only the counts.
+ *
+ * Each cache has a generation. A refresh never reuses a load that started before the change it
+ * must pick up (the old load's result is neither cached nor handed to the refreshing caller).
+ */
 export class MailboxRegistry {
-  private cache: CacheEntry | null = null;
-  private inFlight: Promise<CacheEntry> | null = null;
-  private generation = 0;
+  private names: NamesEntry | null = null;
+  private namesGen = 0;
+  private namesInFlight: InFlight<NamesEntry> | null = null;
+  private counts: CountsEntry | null = null;
+  private countsGen = 0;
+  private countsInFlight: InFlight<CountsEntry> | null = null;
   private readonly ttlMs: number;
+  private readonly countsTtlMs: number;
   private readonly now: () => number;
 
   constructor(
@@ -232,18 +294,28 @@ export class MailboxRegistry {
     private readonly config: Config,
     options: MailboxRegistryOptions = {},
   ) {
-    this.ttlMs = options.ttlMs ?? 60_000;
+    this.ttlMs = options.ttlMs ?? 5 * 60_000;
+    this.countsTtlMs = options.countsTtlMs ?? 60_000;
     this.now = options.now ?? Date.now;
+    // A folder that vanished (renamed or deleted in Apple Mail) makes the cached names stale.
+    imap.onMailboxMissing = () => this.invalidate();
   }
 
+  /** Forget everything (after a folder was created, renamed or deleted). */
   invalidate(): void {
-    this.cache = null;
-    this.generation++;
+    this.names = null;
+    this.namesGen++;
+    this.invalidateCounts();
   }
 
-  private async load(): Promise<CacheEntry> {
-    const generation = this.generation;
-    const entries = await this.imap.run((client) => client.list({ statusQuery: { messages: true, unseen: true } }), { retry: true });
+  /** Forget the message counts only (after moves, flag changes, appends). */
+  invalidateCounts(): void {
+    this.counts = null;
+    this.countsGen++;
+  }
+
+  private async loadNames(gen: number): Promise<NamesEntry> {
+    const entries = await this.imap.run((client) => client.list(), { retry: true });
     const infos = entries.map(toMailboxInfo);
     for (const m of infos) {
       if (!m.hasChildren) m.hasChildren = infos.some((o) => o !== m && o.path.startsWith(m.path + m.delimiter));
@@ -251,41 +323,78 @@ export class MailboxRegistry {
     const special = computeSpecialMap(infos, this.config.mailboxOverrides);
     const labelled = labelSpecials(infos, special.map);
     const labelledMap = computeSpecialMap(labelled, this.config.mailboxOverrides);
-    const entry: CacheEntry = { at: this.now(), mailboxes: sortMailboxesForDisplay(labelled), special: labelledMap };
-    if (generation === this.generation) this.cache = entry;
+    const entry: NamesEntry = { at: this.now(), mailboxes: sortMailboxesForDisplay(labelled), special: labelledMap };
+    if (gen === this.namesGen) this.names = entry;
     return entry;
   }
 
-  private async entry(refresh = false): Promise<CacheEntry> {
-    if (!refresh && this.cache && this.now() - this.cache.at < this.ttlMs) return this.cache;
+  private async namesEntry(refresh = false): Promise<NamesEntry> {
+    if (!refresh && this.names && this.now() - this.names.at < this.ttlMs) return this.names;
     if (refresh) this.invalidate();
-    this.inFlight ??= this.load().finally(() => {
-      this.inFlight = null;
-    });
-    return this.inFlight;
+    const gen = this.namesGen;
+    if (!this.namesInFlight || this.namesInFlight.gen !== gen) {
+      const p = this.loadNames(gen).finally(() => {
+        if (this.namesInFlight?.p === p) this.namesInFlight = null;
+      });
+      this.namesInFlight = { gen, p };
+    }
+    return this.namesInFlight.p;
   }
 
-  /** All mailboxes (INBOX, specials, rest), with counts. */
-  async list(options: { refresh?: boolean } = {}): Promise<MailboxInfo[]> {
-    return (await this.entry(options.refresh)).mailboxes;
+  private async loadCounts(gen: number): Promise<CountsEntry> {
+    const entries = await this.imap.run((client) => client.list({ statusQuery: { messages: true, unseen: true } }), { retry: true });
+    const counts = new Map<string, { total: number | null; unread: number | null }>();
+    for (const e of entries) {
+      const m = toMailboxInfo(e);
+      counts.set(m.path, { total: m.total, unread: m.unread });
+    }
+    const entry: CountsEntry = { at: this.now(), counts };
+    if (gen === this.countsGen) this.counts = entry;
+    return entry;
+  }
+
+  private async countsEntry(): Promise<CountsEntry> {
+    if (this.counts && this.now() - this.counts.at < this.countsTtlMs) return this.counts;
+    const gen = this.countsGen;
+    if (!this.countsInFlight || this.countsInFlight.gen !== gen) {
+      const p = this.loadCounts(gen).finally(() => {
+        if (this.countsInFlight?.p === p) this.countsInFlight = null;
+      });
+      this.countsInFlight = { gen, p };
+    }
+    return this.countsInFlight.p;
+  }
+
+  /**
+   * All mailboxes (INBOX, specials, rest). `total`/`unread` are null unless `counts: true`, which
+   * costs one STATUS per folder on iCloud.
+   */
+  async list(options: { refresh?: boolean; counts?: boolean } = {}): Promise<MailboxInfo[]> {
+    const names = await this.namesEntry(options.refresh);
+    if (!options.counts) return names.mailboxes;
+    const counts = await this.countsEntry();
+    return names.mailboxes.map((m) => {
+      const c = counts.counts.get(m.path);
+      return { ...m, total: m.selectable ? (c?.total ?? null) : null, unread: m.selectable ? (c?.unread ?? null) : null };
+    });
   }
 
   async specialResolution(): Promise<SpecialResolution> {
-    return (await this.entry()).special;
+    return (await this.namesEntry()).special;
   }
 
   /**
    * Resolve a user-supplied mailbox name. A miss on a cached list triggers one refresh (the folder
-   * may have been created in Apple Mail within the last minute).
+   * may have been created in Apple Mail since the list was cached).
    */
   async resolve(input: string, options: { requireSelectable?: boolean } = {}): Promise<MailboxInfo> {
-    let entry = await this.entry();
+    let entry = await this.namesEntry();
     let mailbox: MailboxInfo;
     try {
       mailbox = resolveMailboxName(input, entry.mailboxes, entry.special.map);
     } catch (err) {
       if (!(err instanceof MailError) || err.code !== 'NOT_FOUND') throw err;
-      entry = await this.entry(true);
+      entry = await this.namesEntry(true);
       mailbox = resolveMailboxName(input, entry.mailboxes, entry.special.map);
     }
     if ((options.requireSelectable ?? true) && !mailbox.selectable) {
@@ -325,5 +434,11 @@ export class MailboxRegistry {
   async searchableMailboxes(): Promise<MailboxInfo[]> {
     const mailboxes = await this.list();
     return mailboxes.filter((m) => m.selectable && m.specialUse !== 'trash' && m.specialUse !== 'junk' && !isNotesMailbox(m));
+  }
+
+  /** Selectable mailboxes all_mailboxes leaves out (Trash, Junk, Notes). */
+  async excludedFromAllMailboxes(): Promise<MailboxInfo[]> {
+    const mailboxes = await this.list();
+    return mailboxes.filter((m) => m.selectable && (m.specialUse === 'trash' || m.specialUse === 'junk' || isNotesMailbox(m)));
   }
 }

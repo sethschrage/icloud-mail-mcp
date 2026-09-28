@@ -94,3 +94,18 @@ describe('helpers', () => {
     expect(formatAddress({ name: 'Only Name' })).toBe('Only Name');
   });
 });
+
+// addr-1: space-separated addresses are never silently re-read as a display name.
+describe('several addresses in one string', () => {
+  it.each(['a@x.com b@y.com', '<a@x.com> <b@y.com>', 'Alice <a@x.com> <b@y.com>', 'alice@example.com bob@example.com carol@example.com'])('rejects %s', (input) => {
+    expect(() => parseAddressString(input, 'to')).toThrow(/more than one address/);
+  });
+  it('still accepts proper lists and names', () => {
+    expect(parseAddressString('Alice <a@x.com>, Bob <b@y.com>', 'to')).toEqual([
+      { name: 'Alice', address: 'a@x.com' },
+      { name: 'Bob', address: 'b@y.com' },
+    ]);
+    expect(parseAddressString('"Smith, Jane" <jane@x.com>', 'to')).toEqual([{ name: 'Smith, Jane', address: 'jane@x.com' }]);
+    expect(parseAddressString('"jane@x.com" <jane@x.com>', 'to')).toEqual([{ name: '', address: 'jane@x.com' }]);
+  });
+});

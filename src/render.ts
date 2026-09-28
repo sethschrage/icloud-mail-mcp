@@ -2,14 +2,41 @@
  * Text rendering of tool results (SPEC §5 "Output format"): compact JSON for lists/actions, and a
  * readable layout for get_message (header block, attachments, wrapped body).
  */
-import { formatSize, toJson, truncateResult, MAX_RESULT_CHARS } from './format.js';
-import type { FullMessage } from './imap/fetch.js';
+import { decodedSizeEstimate, formatDateISO, formatSize, toJson, truncateResult, MAX_RESULT_CHARS } from './format.js';
+import { renderAddress, type FullMessage } from './imap/fetch.js';
 import { UNTRUSTED_LIST_NOTE, UNTRUSTED_MESSAGE_NOTE, sanitizeInline, wrapUntrusted } from './safety/untrusted.js';
-import { formatAddress, type EmailAddress } from './smtp/address.js';
+import type { EmailAddress } from './smtp/address.js';
 
-/** Search/thread results: one-line untrusted reminder, then compact JSON. */
-export function renderListResult(result: unknown): string {
-  return truncateResult(`${UNTRUSTED_LIST_NOTE}\n${toJson(result)}`);
+/**
+ * Search/thread results: one-line untrusted reminder, then compact JSON. A result over the size
+ * limit is shortened structurally, never by cutting the JSON text: whole messages are dropped
+ * (from the end, or from the start with `keep: 'last'` for threads, which keep the most recent),
+ * `returned`/`has_more` are corrected and a note says how to page.
+ */
+export function renderListResult(result: unknown, options: { keep?: 'first' | 'last' } = {}): string {
+  const render = (r: unknown): string => `${UNTRUSTED_LIST_NOTE}\n${toJson(r)}`;
+  let text = render(result);
+  if (text.length <= MAX_RESULT_CHARS) return text;
+  const r = result as { messages?: unknown[]; returned?: number; has_more?: boolean; note?: string };
+  if (!r || typeof r !== 'object' || !Array.isArray(r.messages)) return truncateResult(text);
+  const all = r.messages;
+  let lo = 0;
+  let hi = all.length;
+  const build = (n: number): Record<string, unknown> => {
+    const messages = options.keep === 'last' ? all.slice(all.length - n) : all.slice(0, n);
+    const shortened: Record<string, unknown> = { ...r, messages, returned: messages.length };
+    if ('has_more' in r) shortened['has_more'] = true;
+    shortened['note'] = `${r.note ? `${r.note} ` : ''}Result shortened to ${messages.length} of ${all.length} messages to stay under the size limit; use a smaller limit${options.keep === 'last' ? '' : ' or page with offset'}.`;
+    return shortened;
+  };
+  // Largest n whose rendering fits.
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (render(build(mid)).length <= MAX_RESULT_CHARS) lo = mid;
+    else hi = mid - 1;
+  }
+  text = render(build(lo));
+  return text.length <= MAX_RESULT_CHARS ? text : truncateResult(text);
 }
 
 /** Action results: compact JSON. */
@@ -26,6 +53,8 @@ export interface MessageView {
   htmlTruncated: boolean;
   htmlTotalChars: number;
   maxChars: number;
+  /** The configured maximum (MAIL_MAX_BODY_CHARS); a call cannot read more than this. */
+  configuredMax: number;
   notes: string[];
 }
 
@@ -38,7 +67,7 @@ export function truncateChars(text: string, max: number): { text: string; trunca
   return { text: text.slice(0, end), truncated: true };
 }
 
-export function buildMessageView(message: FullMessage, maxChars: number, notes: string[] = []): MessageView {
+export function buildMessageView(message: FullMessage, maxChars: number, notes: string[] = [], configuredMax: number = maxChars): MessageView {
   const body = truncateChars(message.bodyText, maxChars);
   const html = message.html === null ? null : truncateChars(message.html, maxChars);
   return {
@@ -50,12 +79,14 @@ export function buildMessageView(message: FullMessage, maxChars: number, notes: 
     htmlTruncated: html ? html.truncated : false,
     htmlTotalChars: message.html?.length ?? 0,
     maxChars,
+    configuredMax,
     notes,
   };
 }
 
+/** Addresses for the header block: every address in full, names sanitised and capped. */
 function addrs(list: EmailAddress[]): string {
-  return list.map((a) => sanitizeInline(formatAddress(a), 500)).join(', ');
+  return list.map(renderAddress).join(', ');
 }
 
 /** Readable get_message layout. Header values and filenames are sanitised to single lines. */
@@ -71,7 +102,9 @@ export function renderMessageView(view: MessageView): string {
   push('Date', m.date);
   push('From', addrs(m.addresses.from));
   if (m.addresses.sender.length && addrs(m.addresses.sender) !== addrs(m.addresses.from)) push('Sender', addrs(m.addresses.sender));
-  push('Reply-To', addrs(m.addresses.replyTo));
+  // Only a Reply-To the message really has, and only when it differs from From (a phishing sign).
+  const sameAsFrom = (a: EmailAddress): boolean => m.addresses.from.some((f) => f.address.toLowerCase() === a.address.toLowerCase());
+  if (m.addresses.replyTo.length && !m.addresses.replyTo.every(sameAsFrom)) push('Reply-To', `${addrs(m.addresses.replyTo)} (differs from From)`);
   push('To', addrs(m.addresses.to));
   push('Cc', addrs(m.addresses.cc));
   push('Bcc', addrs(m.addresses.bcc));
@@ -97,10 +130,13 @@ export function renderMessageView(view: MessageView): string {
   } else {
     lines.push(`Attachments (${m.attachments.length}; use download_attachment with the part number):`);
     for (const a of m.attachments) {
-      const extras = [a.content_type, a.size !== null ? formatSize(a.size) : null, a.inline ? 'inline' : null, a.content_id ? `cid ${sanitizeInline(a.content_id, 200)}` : null].filter(
-        (x): x is string => !!x,
-      );
-      lines.push(`- part ${a.part}: ${a.filename ? `"${sanitizeInline(a.filename, 300)}"` : '(no filename)'} (${extras.join(', ')})`);
+      // BODYSTRUCTURE sizes are encoded sizes: show the decoded size, as the download reports it.
+      const size = a.size !== null ? `${a.encoding === 'base64' ? 'about ' : ''}${formatSize(decodedSizeEstimate(a.size, a.encoding))}` : null;
+      const extras = [a.content_type, size, a.inline ? 'inline' : null, a.content_id ? `cid ${sanitizeInline(a.content_id, 200)}` : null].filter((x): x is string => !!x);
+      const embedded = a.embedded
+        ? ` [attached message: from ${sanitizeInline(a.embedded.from, 300) || 'unknown'}, subject "${sanitizeInline(a.embedded.subject, 300) || '(no subject)'}"${a.embedded.date ? `, ${formatDateISO(a.embedded.date, 'UTC') ?? ''}` : ''}; download_attachment shows its text]`
+        : '';
+      lines.push(`- part ${a.part}: ${a.filename ? `"${sanitizeInline(a.filename, 300)}"` : '(no filename)'} (${extras.join(', ')})${embedded}`);
     }
   }
 
@@ -110,7 +146,11 @@ export function renderMessageView(view: MessageView): string {
   lines.push(`Body (${fmt}; ${view.bodyTruncated ? `showing ${shown} of ${view.bodyTotalChars}` : `${view.bodyTotalChars}`} characters):`);
   lines.push(wrapUntrusted(view.body || (m.bodyFormat === 'none' ? '(this message has no text body)' : '')));
   if (view.bodyTruncated) {
-    lines.push(`[Body truncated: showing ${shown} of ${view.bodyTotalChars} characters. Call get_message with a larger max_chars (up to 100000) to read more.]`);
+    const how =
+      view.maxChars >= view.configuredMax
+        ? `This is the configured maximum; to read more, the user can raise "Maximum email length shown to Claude" in the extension settings (MAIL_MAX_BODY_CHARS, now ${view.configuredMax}).`
+        : `Call get_message with a larger max_chars (up to ${view.configuredMax}) to read more.`;
+    lines.push(`[Body truncated: showing ${shown} of ${view.bodyTotalChars} characters. ${how}]`);
   }
   if (view.html !== null) {
     lines.push('');
@@ -122,7 +162,7 @@ export function renderMessageView(view: MessageView): string {
   if (text.length > MAX_RESULT_CHARS) {
     // Never cut the wrapped block's END marker: shrink the body instead.
     const excess = text.length - MAX_RESULT_CHARS + 200;
-    const smaller = buildMessageView(m, Math.max(1000, view.body.length - excess), view.notes);
+    const smaller = buildMessageView(m, Math.max(1000, view.body.length - excess), view.notes, view.configuredMax);
     if (smaller.body.length < view.body.length) {
       smaller.html = null;
       smaller.notes = [...view.notes, 'The output was shortened to stay within the tool result size limit.'];

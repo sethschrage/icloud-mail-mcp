@@ -19,8 +19,12 @@ export interface AttachmentInfo {
   content_type: string;
   /** Encoded size on the server in bytes (base64 inflates by ~4/3). */
   size: number | null;
+  /** Content-Transfer-Encoding (lowercase), used to estimate the decoded size. */
+  encoding: string;
   inline: boolean;
   content_id: string | null;
+  /** For an attached message (message/rfc822): its From, Subject and Date. */
+  embedded?: { from: string; subject: string; date: string | null };
 }
 
 const lower = (s: string | undefined): string => (s ?? '').toLowerCase();
@@ -63,6 +67,24 @@ function isInlineImage(node: MessageStructureObject): boolean {
   return !!node.id && lower(node.disposition) !== 'attachment' && lower(node.type).startsWith('image/');
 }
 
+/** Encoded size from which an inline image counts as a photo rather than a logo or tracker. */
+export const INLINE_PHOTO_MIN_BYTES = 64 * 1024;
+const CAMERA_FILENAME = /^(IMG|DSC|DSCN|PXL|Photo|PHOTO)[_ -]?\d/;
+
+/**
+ * An inline (cid) image that the user thinks of as an attachment: Apple Mail sends attached photos
+ * as `Content-Disposition: inline; filename=IMG_1234.jpeg` inside multipart/related. Such an image
+ * has a filename and either a photo-like size, Apple's x-unix-mode parameter or a camera-style
+ * name; small named signature logos (Outlook's image001.png) and nameless trackers do not count.
+ */
+export function isLikelyInlinePhoto(node: MessageStructureObject): boolean {
+  if (!isInlineImage(node)) return false;
+  const name = filenameOf(node);
+  if (!name) return false;
+  const size = typeof node.size === 'number' ? node.size : 0;
+  return size >= INLINE_PHOTO_MIN_BYTES || node.parameters?.['x-unix-mode'] !== undefined || CAMERA_FILENAME.test(name);
+}
+
 function textRef(node: MessageStructureObject, singlePartKey: string): TextPartRef | null {
   const type = lower(node.type);
   if (type !== 'text/plain' && type !== 'text/html') return null;
@@ -84,27 +106,48 @@ function forEachLeaf(node: MessageStructureObject, fn: (leaf: MessageStructureOb
   fn(node);
 }
 
+function embeddedInfo(leaf: MessageStructureObject): AttachmentInfo['embedded'] {
+  const env = leaf.envelope;
+  if (!env || !isMessageRfc822(leaf)) return undefined;
+  const from = env.from?.[0];
+  const fromText = from ? (from.name ? `${from.name} <${from.address ?? ''}>` : (from.address ?? '')) : '';
+  const date = env.date ? new Date(env.date) : null;
+  return { from: fromText, subject: env.subject ?? '', date: date && !Number.isNaN(date.getTime()) ? date.toISOString() : null };
+}
+
 /** All attachments (see isAttachmentLeaf), in MIME order. */
 export function collectAttachments(root: MessageStructureObject): AttachmentInfo[] {
   const out: AttachmentInfo[] = [];
   forEachLeaf(root, (leaf) => {
     if (!isAttachmentLeaf(leaf)) return;
-    out.push({
+    const info: AttachmentInfo = {
       part: partNumber(leaf),
       filename: filenameOf(leaf),
       content_type: lower(leaf.type) || 'application/octet-stream',
       size: typeof leaf.size === 'number' ? leaf.size : null,
+      encoding: lower(leaf.encoding) || '7bit',
       inline: isInlineImage(leaf),
       content_id: leaf.id ?? null,
-    });
+    };
+    const embedded = embeddedInfo(leaf);
+    if (embedded) info.embedded = embedded;
+    out.push(info);
   });
   return out;
 }
 
-/** has_attachments in summaries: any attachment except inline (cid-referenced) images. */
+/**
+ * has_attachments in summaries: any attachment except embedded decorations (inline cid images such
+ * as logos and trackers). Inline photos with a filename still count (see isLikelyInlinePhoto).
+ */
 export function hasRealAttachments(root: MessageStructureObject | undefined): boolean {
   if (!root) return false;
-  return collectAttachments(root).some((a) => !a.inline);
+  let found = false;
+  forEachLeaf(root, (leaf) => {
+    if (found || !isAttachmentLeaf(leaf)) return;
+    if (!isInlineImage(leaf) || isLikelyInlinePhoto(leaf)) found = true;
+  });
+  return found;
 }
 
 /**

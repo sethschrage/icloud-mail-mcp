@@ -9,7 +9,7 @@ export const READ_TOOLS = ['list_mailboxes', 'search_messages', 'get_message', '
 export const FILE_TOOLS = ['download_attachment'];
 export const MAILBOX_TOOLS = ['mark_messages', 'move_messages', 'archive_messages', 'trash_messages', 'create_mailbox', 'rename_mailbox', 'delete_mailbox'];
 export const DRAFT_TOOLS = ['save_draft'];
-export const SEND_TOOLS = ['send_email', 'reply_to_message', 'forward_message'];
+export const SEND_TOOLS = ['send_email', 'reply_to_message', 'forward_message', 'send_draft'];
 export const DELETE_TOOLS = ['delete_messages_permanently'];
 
 export const DEFAULT_TOOLS = [...READ_TOOLS, ...FILE_TOOLS, ...MAILBOX_TOOLS, ...DRAFT_TOOLS, ...SEND_TOOLS];
@@ -39,6 +39,7 @@ export const EXPECTED_HINTS: Record<string, Hints> = {
   send_email: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   reply_to_message: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   forward_message: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  send_draft: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   delete_messages_permanently: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 };
 
@@ -63,6 +64,7 @@ export const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   send_email: { to: ['friend@example.com'], subject: 's', body: 'b' },
   reply_to_message: { mailbox: 'INBOX', uid: 1, body: 'b' },
   forward_message: { mailbox: 'INBOX', uid: 1, to: ['friend@example.com'] },
+  send_draft: { uid: 1 },
   delete_messages_permanently: { mailbox: 'Deleted Messages', uids: [1] },
 };
 

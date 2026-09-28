@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { MailError } from '../../src/errors.js';
-import { buildSearchObject, hasCriteria, sortUidsDesc, toSequenceSet } from '../../src/imap/search.js';
+import type { ImapManager } from '../../src/imap/client.js';
+import type { MailboxRegistry } from '../../src/imap/mailboxes.js';
+import { ALL_MAILBOXES_MAX_WINDOW, buildSearchObject, hasCriteria, searchMessages, sortUidsDesc, toSequenceSet } from '../../src/imap/search.js';
 
 const TZ = 'America/Los_Angeles';
 const NOW = new Date('2026-09-28T16:00:00Z');
@@ -19,17 +21,22 @@ describe('buildSearchObject', () => {
     expect(b.empty).toBe(false);
   });
 
-  it('turns dates into UTC midnight of the calendar date (since inclusive, before exclusive)', () => {
+  it('widens the server date window by a day and keeps exact local-midnight bounds for the client filter', () => {
     const b = buildSearchObject({ since: '2026-09-01', before: '2026-09-20T08:00:00+09:00' }, { timeZone: TZ, now: NOW });
-    expect((b.query.since as Date).toISOString()).toBe('2026-09-01T00:00:00.000Z');
-    expect((b.query.before as Date).toISOString()).toBe('2026-09-20T00:00:00.000Z');
+    expect((b.query.since as Date).toISOString()).toBe('2026-08-31T00:00:00.000Z');
+    expect((b.query.before as Date).toISOString()).toBe('2026-09-21T00:00:00.000Z');
+    // Local midnight in Los Angeles (PDT, UTC-7).
+    expect(new Date(b.range?.start ?? 0).toISOString()).toBe('2026-09-01T07:00:00.000Z');
+    expect(new Date(b.range?.end ?? 0).toISOString()).toBe('2026-09-20T07:00:00.000Z');
   });
 
   it('newer_than_days counts from today in MAIL_TIMEZONE and keeps the later of since/newer_than_days', () => {
-    expect((buildSearchObject({ newerThanDays: 7 }, { timeZone: TZ, now: NOW }).query.since as Date).toISOString()).toBe('2026-09-21T00:00:00.000Z');
-    expect((buildSearchObject({ newerThanDays: 0 }, { timeZone: TZ, now: NOW }).query.since as Date).toISOString()).toBe('2026-09-28T00:00:00.000Z');
-    expect((buildSearchObject({ newerThanDays: 7, since: '2026-09-25' }, { timeZone: TZ, now: NOW }).query.since as Date).toISOString()).toBe('2026-09-25T00:00:00.000Z');
-    expect((buildSearchObject({ newerThanDays: 7, since: '2026-01-01' }, { timeZone: TZ, now: NOW }).query.since as Date).toISOString()).toBe('2026-09-21T00:00:00.000Z');
+    const since = (c: Parameters<typeof buildSearchObject>[0]): string | undefined => buildSearchObject(c, { timeZone: TZ, now: NOW }).range?.since?.day.toString();
+    expect(since({ newerThanDays: 7 })).toBe('21');
+    expect(since({ newerThanDays: 0 })).toBe('28');
+    expect(since({ newerThanDays: 7, since: '2026-09-25' })).toBe('25');
+    expect(since({ newerThanDays: 7, since: '2026-01-01' })).toBe('21');
+    expect((buildSearchObject({ newerThanDays: 7 }, { timeZone: TZ, now: NOW }).query.since as Date).toISOString()).toBe('2026-09-20T00:00:00.000Z');
   });
 
   it('rejects inverted ranges and bad values', () => {
@@ -70,5 +77,15 @@ describe('UID helpers', () => {
     expect(toSequenceSet([5, 1, 2, 3, 9, 10, 7])).toBe('1:3,5,7,9:10');
     expect(toSequenceSet([42])).toBe('42');
     expect(toSequenceSet([])).toBe('');
+  });
+});
+
+// imap-10 / dos-2: deep all_mailboxes paging is refused instead of fetching offset+limit per folder.
+describe('all_mailboxes window', () => {
+  it('rejects offset + limit above the cap before touching the server', async () => {
+    const untouched = new Proxy({}, { get: () => { throw new Error('server touched'); } });
+    await expect(
+      searchMessages(untouched as ImapManager, untouched as MailboxRegistry, { timezone: 'UTC' }, { allMailboxes: true, offset: ALL_MAILBOXES_MAX_WINDOW, limit: 20, includeSnippets: false }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
   });
 });

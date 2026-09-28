@@ -56,10 +56,47 @@ describe('native confirmation dialog', () => {
     expect(await createConfirmer({ platform: 'darwin', exec: () => Promise.reject(new Error('boom')) })(req)).toMatchObject({ status: 'unavailable' });
   });
 
-  it('caps the message at ~1000 characters', async () => {
+  it('caps an oversized message (the builder keeps recipient lines; only the hard cap applies here)', async () => {
     const calls: Array<{ file: string; args: readonly string[]; timeoutMs: number }> = [];
-    await createConfirmer({ platform: 'darwin', exec: exec({ stdout: 'Send' }, calls) })({ ...req, message: 'x'.repeat(5000) });
-    expect((calls[0]?.args[3] ?? '').length).toBeLessThanOrEqual(DIALOG_MESSAGE_MAX_CHARS);
+    await createConfirmer({ platform: 'darwin', exec: exec({ stdout: 'Send' }, calls) })({ ...req, message: 'x'.repeat(20_000) });
+    expect((calls[0]?.args[3] ?? '').length).toBeLessThanOrEqual(6000);
+  });
+
+  it('keeps only the builder\'s own line breaks', async () => {
+    const calls: Array<{ file: string; args: readonly string[]; timeoutMs: number }> = [];
+    await createConfirmer({ platform: 'darwin', exec: exec({ stdout: 'Send' }, calls) })({ ...req, message: 'a\nb\rc\u2028d\u0085e' });
+    expect(calls[0]?.args[3]).toBe('a\nb c d e');
+  });
+
+  // integ-5: an abandoned call kills the dialog and never counts as confirmed.
+  it('passes the abort signal to osascript and reports an aborted dialog as cancelled', async () => {
+    const seen: Array<AbortSignal | undefined> = [];
+    const controller = new AbortController();
+    const slow: ExecFileFn = (_f, _a, opts) => {
+      seen.push(opts.signal);
+      return new Promise((resolve) => {
+        opts.signal?.addEventListener('abort', () => resolve({ stdout: '', stderr: '', code: null, error: Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' }) }));
+      });
+    };
+    const pending = createConfirmer({ platform: 'darwin', exec: slow })(req, { signal: controller.signal });
+    controller.abort();
+    expect(await pending).toEqual({ status: 'declined', reason: 'cancelled' });
+    expect(seen[0]).toBe(controller.signal);
+    // Already aborted: osascript is never started.
+    const calls: Array<{ file: string; args: readonly string[]; timeoutMs: number }> = [];
+    expect(await createConfirmer({ platform: 'darwin', exec: exec({ stdout: 'Send' }, calls) })(req, { signal: controller.signal })).toEqual({ status: 'declined', reason: 'cancelled' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('the default executor kills the child on abort', async () => {
+    const { defaultExecFile } = await import('../../src/credentials.js');
+    const controller = new AbortController();
+    const started = Date.now();
+    const p = defaultExecFile('/bin/sleep', ['30'], { timeoutMs: 60_000, signal: controller.signal });
+    setTimeout(() => controller.abort(), 100);
+    const r = await p;
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(r.error?.name).toBe('AbortError');
   });
 
   it('works through the real execFile path with a stand-in osascript', async () => {
@@ -83,24 +120,67 @@ describe('native confirmation dialog', () => {
 });
 
 describe('dialog text', () => {
-  it('shows From, final recipients incl. Bcc, subject, the body start and attachment names', () => {
+  it('shows From, final recipients incl. Bcc with counts, subject, the body start and attachment names', () => {
     const text = buildSendConfirmationMessage({
-      from: 'Me <me@icloud.com>',
-      to: ['a@example.com'],
-      cc: ['b@example.com'],
-      bcc: ['c@example.com'],
+      from: { name: 'Me', address: 'me@icloud.com' },
+      to: [{ address: 'a@example.com' }],
+      cc: [{ address: 'b@example.com' }],
+      bcc: [{ address: 'c@example.com' }],
       subject: 'Hello',
-      body: `${'word '.repeat(200)}END`,
-      attachments: ['report.pdf'],
+      body: `${'word '.repeat(400)}END`,
+      attachments: [{ name: 'report.pdf' }],
     });
-    expect(text).toContain('From: Me <me@icloud.com>');
-    expect(text).toContain('To: a@example.com');
-    expect(text).toContain('Cc: b@example.com');
-    expect(text).toContain('Bcc: c@example.com');
+    expect(text).toContain('Recipients: 3 (To 1, Cc 1, Bcc 1)');
+    expect(text).toContain('From: me@icloud.com (Me)');
+    expect(text).toContain('To (1): a@example.com');
+    expect(text).toContain('Cc (1): b@example.com');
+    expect(text).toContain('Bcc (1): c@example.com');
     expect(text).toContain('Subject: Hello');
-    expect(text).toContain('Attachments: report.pdf');
+    expect(text).toContain('Attachments (1): report.pdf');
     expect(text).not.toContain('END');
     expect(text.length).toBeLessThanOrEqual(DIALOG_MESSAGE_MAX_CHARS);
+  });
+
+  // confirm-1 (security): hostile reply recipients cannot hide the real address or forge lines.
+  it('always shows the real address, never lets a display name forge lines, and warns on look-alike names', () => {
+    const base = { from: { address: 'me@icloud.com' }, cc: [], bcc: [], subject: 'Re: Q3', body: 'numbers', attachments: [] };
+    const dots = buildSendConfirmationMessage({ ...base, to: [{ name: `Your Boss (boss@company.example)${'.'.repeat(600)}`, address: 'attacker@evil.test' }] });
+    expect(dots).toContain('attacker@evil.test');
+    expect(dots).toMatch(/WARNING: a display name contains a different email address/);
+    const crlf = buildSendConfirmationMessage({ ...base, to: [{ name: 'Your Boss\r\nBcc: injected@evil.test\u2028X-Evil: 1', address: 'attacker@evil.test' }] });
+    const lines = crlf.split('\n');
+    expect(lines.filter((l) => l.startsWith('Bcc'))).toHaveLength(0);
+    expect(lines.filter((l) => l.startsWith('X-Evil'))).toHaveLength(0);
+    expect(crlf).toContain('attacker@evil.test');
+  });
+
+  // confirm-1 (smtp): a 250-character name does not push a later recipient out; long lists say how many are hidden.
+  it('lists every recipient address and says when a list was shortened', () => {
+    const base = { from: { address: 'me@icloud.com' }, cc: [], bcc: [], subject: 's', body: 'b', attachments: [] };
+    const two = buildSendConfirmationMessage({ ...base, to: [{ name: 'Alice Nguyen', address: 'alice@example.com' }, { name: `Accounts Payable ${'x'.repeat(250)}`, address: 'attacker@evil.test' }] });
+    expect(two).toContain('alice@example.com');
+    expect(two).toContain('attacker@evil.test');
+    const many = Array.from({ length: 400 }, (_, i) => ({ address: `person${i}@example${i % 7}.com` }));
+    const big = buildSendConfirmationMessage({ ...base, to: many });
+    expect(big).toContain('To (400):');
+    expect(big).toMatch(/… and \d+ more \(LIST SHORTENED; their domains: /);
+  });
+
+  // confirm-2: model-supplied input cannot push Bcc, Reply-To, attachments or the subject out of view.
+  it('keeps every field visible with hostile long input (poc5)', () => {
+    const text = buildSendConfirmationMessage({
+      from: { name: 'F'.repeat(250), address: 'me@icloud.com' },
+      to: [{ name: 'N'.repeat(250), address: 'ap.team@example-corp.example' }, { address: 'exfil@attacker.example' }],
+      cc: Array.from({ length: 10 }, (_, i) => ({ address: `colleague${i}.with.a.long.address@example-corp.example` })),
+      bcc: [{ address: 'archive.mailbox.for.finance.department@example-corp.example' }, { address: 'second-exfil@attacker.example' }],
+      replyTo: [{ address: 'attacker@attacker.example' }],
+      subject: 'Quarterly numbers',
+      body: 'please see attached',
+      attachments: [...Array.from({ length: 20 }, () => ({ name: 'report.xlsx' })), { name: 'passwords.csv' }, { name: 'invoice.pdf', realName: 'secrets.txt' }],
+    });
+    for (const needle of ['exfil@attacker.example', 'second-exfil@attacker.example', 'passwords.csv', 'Reply-To (1): attacker@attacker.example', 'Subject: Quarterly numbers', 'report.xlsx ×20', '[real file: secrets.txt]', 'Attachments (22)']) {
+      expect(text).toContain(needle);
+    }
   });
 
   it('describes permanent deletion', () => {

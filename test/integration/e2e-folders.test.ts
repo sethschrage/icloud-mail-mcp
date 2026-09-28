@@ -14,6 +14,7 @@ import {
   cleanupDirs,
   makeTestDirs,
   portOpen,
+  skipProfile,
   rawFlags,
   rawSetDeleted,
   rawStatus,
@@ -63,7 +64,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     if (dirs) cleanupDirs(dirs);
   });
 
-  it.skipIf(!target.up)('resolves the special folders and aliases', async () => {
+  it.skipIf(skipProfile(target.up))('resolves the special folders and aliases', async () => {
     const list = json<{ mailboxes: Array<{ path: string; special_use: string | null }> }>(await s.call('list_mailboxes'));
     expect(list.mailboxes.slice(0, 6).map((m) => `${m.special_use}:${m.path}`)).toEqual([
       'inbox:INBOX',
@@ -81,7 +82,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     expect(json<{ total: number }>(await s.call('search_messages', { mailbox: 'bin' })).total).toBe(1);
   });
 
-  it.skipIf(!target.up)('moves messages, returns new UIDs, and leaves other \\Deleted messages alone', async () => {
+  it.skipIf(skipProfile(target.up))('moves messages, returns new UIDs, and leaves other \\Deleted messages alone', async () => {
     await rawSetDeleted('INBOX', 2, true, port); // someone else's pending deletion
     try {
       const before = await rawStatus('Receipts', port);
@@ -97,7 +98,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     }
   });
 
-  it.skipIf(!target.up)('refuses a missing or identical destination', async () => {
+  it.skipIf(skipProfile(target.up))('refuses a missing or identical destination', async () => {
     const missing = await s.call('move_messages', { mailbox: 'INBOX', uids: [2], destination: 'Nope' });
     expect(missing.isError).toBe(true);
     expect(missing.text).toMatch(/create_mailbox/);
@@ -107,7 +108,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     expect(await rawFlags('INBOX', 2, port)).not.toBeNull();
   });
 
-  it.skipIf(!target.up)('archives into Archive and refuses to archive what is already there', async () => {
+  it.skipIf(skipProfile(target.up))('archives into Archive and refuses to archive what is already there', async () => {
     const r = json<MoveResult>(await s.call('archive_messages', { mailbox: 'INBOX', uids: [14] }));
     expect(r).toMatchObject({ destination: 'Archive', moved: 1, new_uids: { '14': 4 } });
     expect(await rawFlags('INBOX', 14, port)).toBeNull();
@@ -117,7 +118,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     expect(again.text).toMatch(/already in the archive folder/);
   });
 
-  it.skipIf(!target.up)('trashes into Deleted Messages and explains when messages are already in Trash', async () => {
+  it.skipIf(skipProfile(target.up))('trashes into Deleted Messages and explains when messages are already in Trash', async () => {
     const r = json<MoveResult>(await s.call('trash_messages', { mailbox: 'INBOX', uids: [17] }));
     expect(r).toMatchObject({ destination: 'Deleted Messages', moved: 1, new_uids: { '17': 2 } });
     expect(await rawFlags('INBOX', 17, port)).toBeNull();
@@ -128,7 +129,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     expect(none).toMatchObject({ moved: 0, not_found: [4242] });
   });
 
-  it.skipIf(!target.up)('permanently deletes only the given UIDs (UID EXPUNGE keeps other \\Deleted messages)', async () => {
+  it.skipIf(skipProfile(target.up))('permanently deletes only the given UIDs (UID EXPUNGE keeps other \\Deleted messages)', async () => {
     await rawSetDeleted('Deleted Messages', 1, true, port);
     try {
       const r = json<{ deleted: number; not_found: number[] }>(await s.call('delete_messages_permanently', { mailbox: 'Deleted Messages', uids: [2, 777] }));
@@ -140,7 +141,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
     }
   });
 
-  it.skipIf(!target.up)('replaces a draft only after saving the new version', async () => {
+  it.skipIf(skipProfile(target.up))('replaces a draft only after saving the new version', async () => {
     const first = json<{ mailbox: string; uid: number }>(await s.call('save_draft', { to: ['friend@example.com'], subject: 'v1', body: 'first version' }));
     expect(first).toMatchObject({ mailbox: 'Drafts', uid: 3 });
     expect(await rawFlags('Drafts', 3, port)).toEqual(expect.arrayContaining(['\\Draft', '\\Seen']));
@@ -165,7 +166,7 @@ describe.each(TARGETS)('folder operations on the $name', (target) => {
 
 const noUidplusUp = await portOpen(PROFILES['no-uidplus']);
 
-describe.skipIf(!noUidplusUp)('expunge guard on the no-uidplus profile (no MOVE, no UIDPLUS)', () => {
+describe.skipIf(skipProfile(noUidplusUp))('expunge guard on the no-uidplus profile (no MOVE, no UIDPLUS)', () => {
   const port = PROFILES['no-uidplus'];
   let dirs: TestDirs;
   let s: McpSession;

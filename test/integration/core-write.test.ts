@@ -62,7 +62,7 @@ describe('mark_messages', () => {
     expect(r.messages).toEqual([{ uid: 29, unread: false, flagged: false, flag_color: null }]);
     expect(await rawFlags('INBOX', 29)).toContain('\\Seen');
     const back = await svc.markMessages({ mailbox: 'INBOX', uids: [29], read: false });
-    expect(back.messages[0]?.unread).toBe(true);
+    expect(back.messages?.[0]?.unread).toBe(true);
     expect(await rawFlags('INBOX', 29)).not.toContain('\\Seen');
   });
 
@@ -79,7 +79,7 @@ describe('mark_messages', () => {
     for (const [color, bits] of Object.entries(expectedBits)) {
       const r = await svc.markMessages({ mailbox: 'INBOX', uids: [2], flagColor: color as 'red' });
       expect(r.not_applied).toEqual([]);
-      expect(r.messages[0]).toMatchObject({ uid: 2, flagged: true, flag_color: color });
+      expect(r.messages?.[0]).toMatchObject({ uid: 2, flagged: true, flag_color: color });
       const flags = (await rawFlags('INBOX', 2)) ?? [];
       expect(flags).toContain('\\Flagged');
       expect(flags.filter((f) => f.startsWith('$MailFlagBit')).sort()).toEqual(bits);
@@ -89,7 +89,7 @@ describe('mark_messages', () => {
   it('flagged:false removes \\Flagged and every colour bit', async () => {
     await svc.markMessages({ mailbox: 'INBOX', uids: [2], flagColor: 'gray' });
     const r = await svc.markMessages({ mailbox: 'INBOX', uids: [2], flagged: false });
-    expect(r.messages[0]).toMatchObject({ flagged: false, flag_color: null });
+    expect(r.messages?.[0]).toMatchObject({ flagged: false, flag_color: null });
     const flags = (await rawFlags('INBOX', 2)) ?? [];
     expect(flags.some((f) => f === '\\Flagged' || f.startsWith('$MailFlagBit'))).toBe(false);
   });

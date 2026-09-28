@@ -17,7 +17,7 @@ export function registerDeleteTools(server: McpServer, rt: ToolRuntime): void {
     {
       title,
       description:
-        'PERMANENTLY deletes (expunges) messages from a mailbox. This bypasses Trash and CANNOT BE UNDONE. Prefer trash_messages, which is recoverable; use this only when the user explicitly asks for permanent deletion, for example to purge messages that are already in Trash. Refused when the server would also purge other messages already marked as deleted. May require a click in a confirmation dialog on the Mac (MAIL_CONFIRM_DIALOG); if the user cancels there, nothing is deleted. Returns the number deleted and UIDs that were not found. Up to 500 UIDs per call.',
+        'PERMANENTLY deletes (expunges) messages from a mailbox. This bypasses Trash and CANNOT BE UNDONE. Prefer trash_messages, which is recoverable; use this only when the user explicitly asks for permanent deletion, for example to purge messages that are already in Trash. Refused when the server would also purge other messages already marked as deleted. May require a click in a confirmation dialog on the Mac ("Confirm on my Mac before sending or permanently deleting"); if the user cancels there, nothing is deleted. Returns the number deleted and UIDs that were not found. Up to 500 UIDs per call.',
       inputSchema: z.strictObject({
         mailbox: mailboxField('Mailbox the messages are in'),
         uids: uidsField(),
