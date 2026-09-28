@@ -1,0 +1,31 @@
+{
+  "name": "icloud-mail-mcp-test-infra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Dovecot IMAP + SMTP sink that mimics iCloud Mail for integration tests",
+  "type": "module",
+  "scripts": {
+    "start": "./start.sh",
+    "stop": "./stop.sh",
+    "reset": "./reset.sh",
+    "seed": "node scripts/seed.mjs",
+    "verify": "node scripts/verify.mjs",
+    "verify:profiles": "node scripts/verify-profiles.mjs",
+    "inventory": "node scripts/inventory.mjs",
+    "clear-outbox": "rm -f smtp-out/*.eml smtp-out/*.json smtp-out/index.jsonl",
+    "certs": "./scripts/gen-certs.sh --force",
+    "start:profiles": "./start.sh --profile all",
+    "stop:profiles": "./stop.sh --profile all",
+    "reset:profiles": "./reset.sh --profile all",
+    "status:profiles": "./scripts/profiles.sh status all"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "imapflow": "^2.1.0",
+    "mailparser": "^3.9.29",
+    "nodemailer": "^10.0.11",
+    "smtp-server": "^3.19.14"
+  }
+}

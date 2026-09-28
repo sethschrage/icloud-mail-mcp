@@ -1,0 +1,377 @@
+/**
+ * Environment parsing -> typed Config (SPEC §3).
+ *
+ * `loadConfig` never throws: the server must start and list its tools even when the configuration
+ * is broken, so problems are collected in `errors` (fatal: every mail tool refuses to run) and
+ * `warnings` (a value was adjusted). The password itself is resolved lazily by credentials.ts.
+ */
+import os from 'node:os';
+import path from 'node:path';
+import { PATH_VARIABLES, expandPath, type PathContext } from './safety/paths.js';
+import { isLogLevel, type LogLevel } from './log.js';
+import { isValidEmailAddress } from './smtp/address.js';
+
+export type SpecialFolder = 'sent' | 'trash' | 'archive' | 'drafts' | 'junk';
+
+export interface Config {
+  email: string;
+  /** App-specific password from ICLOUD_APP_PASSWORD (undefined => Keychain lookup). */
+  password: string | undefined;
+  keychainService: string;
+  /** ICLOUD_IMAP_USER override (undefined => full email, then local-part fallback). */
+  imapUser: string | undefined;
+  smtpUser: string;
+  fromAddress: string;
+  fromName: string | undefined;
+  /** ICLOUD_EMAIL ∪ MAIL_FROM_ADDRESS ∪ MAIL_ALLOWED_FROM, deduplicated case-insensitively. */
+  allowedFrom: string[];
+  allowSend: boolean;
+  allowPermanentDelete: boolean;
+  readOnly: boolean;
+  confirmDialog: boolean;
+  maxSendsPerHour: number;
+  maxRecipients: number;
+  attachmentDir: string;
+  attachFromDirs: string[];
+  maxBodyChars: number;
+  maxAttachmentMb: number;
+  /** null when MAIL_AUDIT_LOG=off. */
+  auditLog: string | null;
+  saveSentCopy: boolean;
+  operationTimeoutSeconds: number;
+  logLevel: LogLevel;
+  timezone: string;
+  mailboxOverrides: Partial<Record<SpecialFolder, string>>;
+  imap: { host: string; port: number; secure: boolean };
+  smtp: { host: string; port: number; secure: boolean; requireTLS: boolean };
+  tlsCaFile: string | undefined;
+}
+
+export interface ConfigResult {
+  config: Config;
+  /** Fatal problems: mail tools must return an isError result explaining these. */
+  errors: string[];
+  /** Non-fatal adjustments (clamped values etc.). */
+  warnings: string[];
+}
+
+export interface LoadConfigOptions {
+  platform?: NodeJS.Platform;
+  home?: string;
+  /** Used when MAIL_TIMEZONE is unset. */
+  systemTimezone?: string;
+  /** Command-line arguments after the script path (`process.argv.slice(2)`); see parseCommandLine. */
+  argv?: readonly string[];
+}
+
+export const MAX_BODY_CHARS_CEILING = 100_000;
+export const ICLOUD_MAX_RECIPIENTS = 500;
+
+const PLACEHOLDER = /^\$\{([^}]+)\}$/;
+
+/**
+ * Claude Desktop passes literal `${user_config.x}` for optional blank fields; treat those (and "")
+ * as unset. `${HOME}`-style path variables are real values and are expanded later.
+ */
+export function isUnsetValue(value: string | undefined): boolean {
+  if (value === undefined) return true;
+  const v = value.trim();
+  if (v === '') return true;
+  const m = PLACEHOLDER.exec(v);
+  if (m && !(PATH_VARIABLES as readonly string[]).includes(m[1] ?? '')) return true;
+  return false;
+}
+
+export function parseBoolean(value: string): boolean | undefined {
+  switch (value.trim().toLowerCase()) {
+    case 'true':
+    case '1':
+    case 'yes':
+      return true;
+    case 'false':
+    case '0':
+    case 'no':
+      return false;
+    default:
+      return undefined;
+  }
+}
+
+/** Split a comma-separated list, dropping blanks and unexpanded placeholders. */
+export function parseList(value: string | undefined): string[] {
+  if (isUnsetValue(value)) return [];
+  return (value ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => !isUnsetValue(s));
+}
+
+/**
+ * Flag after which the .mcpb manifest passes the "Attach files from" folders, one argument per
+ * folder. A `multiple: true` directory setting can only reach the server as separate arguments
+ * (Claude Desktop expands an array-valued `${user_config.x}` in `args`, not inside an env string).
+ */
+export const ATTACH_FROM_DIRS_FLAG = '--attach-from-dirs';
+
+export interface CommandLine {
+  /** Folders listed after --attach-from-dirs; blanks and unexpanded placeholders are dropped. */
+  attachFromDirs: string[];
+  /** Arguments that were not understood (reported as a configuration warning, otherwise ignored). */
+  unknown: string[];
+}
+
+/** Parse the server's command line: `[--attach-from-dirs <folder>...]`. Never throws. */
+export function parseCommandLine(argv: readonly string[]): CommandLine {
+  const attachFromDirs: string[] = [];
+  const unknown: string[] = [];
+  let inDirs = false;
+  for (const arg of argv) {
+    if (arg === ATTACH_FROM_DIRS_FLAG) {
+      inDirs = true;
+    } else if (inDirs) {
+      if (!isUnsetValue(arg)) attachFromDirs.push(arg.trim());
+    } else {
+      unknown.push(arg);
+    }
+  }
+  return { attachFromDirs, unknown };
+}
+
+export function isValidTimezone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function defaultAuditLogPath(platform: NodeJS.Platform, home: string): string {
+  return platform === 'darwin'
+    ? path.join(home, 'Library', 'Logs', 'icloud-mail-mcp', 'audit.jsonl')
+    : path.join(home, '.local', 'state', 'icloud-mail-mcp', 'audit.jsonl');
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadConfigOptions = {}): ConfigResult {
+  const platform = options.platform ?? process.platform;
+  const home = options.home ?? os.homedir();
+  const pathCtx: PathContext = { home };
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const cli = parseCommandLine(options.argv ?? []);
+  if (cli.unknown.length > 0) {
+    const shown = cli.unknown.slice(0, 5).map((a) => JSON.stringify(a.slice(0, 200)));
+    warnings.push(`Ignoring unknown command-line argument(s): ${shown.join(' ')}${cli.unknown.length > 5 ? ' …' : ''}.`);
+  }
+
+  const str = (name: string): string | undefined => {
+    const v = env[name];
+    return isUnsetValue(v) ? undefined : (v ?? '').trim();
+  };
+  const bool = (name: string, def: boolean): boolean => {
+    const v = str(name);
+    if (v === undefined) return def;
+    const b = parseBoolean(v);
+    if (b === undefined) {
+      errors.push(`${name} must be true/false (also accepted: 1/0, yes/no); got "${v}".`);
+      return def;
+    }
+    return b;
+  };
+  const int = (name: string, def: number, min: number, max: number): number => {
+    const v = str(name);
+    if (v === undefined) return def;
+    if (!/^-?\d+$/.test(v)) {
+      errors.push(`${name} must be a whole number; got "${v}".`);
+      return def;
+    }
+    const n = Number(v);
+    if (n < min) {
+      errors.push(`${name} must be at least ${min}; got ${n}.`);
+      return def;
+    }
+    if (n > max) {
+      warnings.push(`${name}=${n} is above the maximum ${max}; using ${max}.`);
+      return max;
+    }
+    return n;
+  };
+  const pathValue = (name: string, def: string): string => {
+    const v = str(name);
+    const expanded = expandPath(v ?? def, pathCtx);
+    if (!path.isAbsolute(expanded)) {
+      errors.push(`${name} must be an absolute path (or start with ~/); got "${v}".`);
+      return expandPath(def, pathCtx);
+    }
+    return expanded;
+  };
+  const address = (name: string, value: string | undefined): string | undefined => {
+    if (value === undefined) return undefined;
+    if (!isValidEmailAddress(value)) {
+      errors.push(`${name} is not a valid email address: "${value}".`);
+      return undefined;
+    }
+    return value;
+  };
+
+  // --- identity -------------------------------------------------------------------------------
+  const emailRaw = str('ICLOUD_EMAIL');
+  let email = '';
+  if (emailRaw === undefined) {
+    errors.push(
+      'ICLOUD_EMAIL is not set. Set it to your iCloud Mail address (for example you@icloud.com) in the extension settings or the server env.',
+    );
+  } else {
+    email = address('ICLOUD_EMAIL', emailRaw) ?? '';
+  }
+
+  // Passed exactly as given (with or without hyphens); only surrounding whitespace from pasting is dropped.
+  const password = str('ICLOUD_APP_PASSWORD');
+  const fromAddress = address('MAIL_FROM_ADDRESS', str('MAIL_FROM_ADDRESS')) ?? email;
+  const smtpUser = str('ICLOUD_SMTP_USER') ?? email;
+
+  const allowedFrom: string[] = [];
+  const pushAllowed = (a: string | undefined): void => {
+    if (!a) return;
+    if (!allowedFrom.some((x) => x.toLowerCase() === a.toLowerCase())) allowedFrom.push(a);
+  };
+  pushAllowed(email || undefined);
+  pushAllowed(fromAddress || undefined);
+  for (const a of parseList(env['MAIL_ALLOWED_FROM'])) pushAllowed(address('MAIL_ALLOWED_FROM', a));
+
+  // --- guardrails -----------------------------------------------------------------------------
+  const readOnly = bool('MAIL_READ_ONLY', false);
+  const allowSend = bool('MAIL_ALLOW_SEND', true);
+  const allowPermanentDelete = bool('MAIL_ALLOW_PERMANENT_DELETE', false);
+  const confirmDialog = bool('MAIL_CONFIRM_DIALOG', false);
+  const maxSendsPerHour = int('MAIL_MAX_SENDS_PER_HOUR', 30, 0, 100_000);
+  const maxRecipients = int('MAIL_MAX_RECIPIENTS', 50, 1, ICLOUD_MAX_RECIPIENTS);
+
+  // --- files ----------------------------------------------------------------------------------
+  const attachmentDir = pathValue('MAIL_ATTACHMENT_DIR', '~/Downloads/iCloud Mail Attachments');
+  // Folders chosen in the extension settings arrive as arguments and take precedence over the env list.
+  const attachFromRaw = str('MAIL_ATTACH_FROM_DIRS');
+  let attachFromSource: { name: string; dirs: string[] };
+  if (cli.attachFromDirs.length > 0) attachFromSource = { name: `The "Attach files from" folders (${ATTACH_FROM_DIRS_FLAG})`, dirs: cli.attachFromDirs };
+  else if (attachFromRaw !== undefined) attachFromSource = { name: 'MAIL_ATTACH_FROM_DIRS entries', dirs: parseList(attachFromRaw) };
+  else attachFromSource = { name: 'Default attachment folders', dirs: ['~/Desktop', '~/Documents', '~/Downloads'] };
+  const attachFromDirs: string[] = [];
+  for (const d of attachFromSource.dirs) {
+    const expanded = expandPath(d, pathCtx);
+    if (!path.isAbsolute(expanded)) {
+      errors.push(`${attachFromSource.name} must be absolute paths (or start with ~/); got "${d}".`);
+      continue;
+    }
+    if (!attachFromDirs.includes(expanded)) attachFromDirs.push(expanded);
+  }
+
+  const maxBodyChars = int('MAIL_MAX_BODY_CHARS', 20_000, 1, MAX_BODY_CHARS_CEILING);
+  const maxAttachmentMb = int('MAIL_MAX_ATTACHMENT_MB', 25, 1, 1024);
+
+  const auditRaw = str('MAIL_AUDIT_LOG');
+  let auditLog: string | null;
+  if (auditRaw !== undefined && auditRaw.toLowerCase() === 'off') auditLog = null;
+  else auditLog = pathValue('MAIL_AUDIT_LOG', defaultAuditLogPath(platform, home));
+
+  const saveSentCopy = bool('MAIL_SAVE_SENT_COPY', true);
+  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', 120, 5, 3600);
+
+  const logLevelRaw = str('MAIL_LOG_LEVEL');
+  let logLevel: LogLevel = 'warn';
+  if (logLevelRaw !== undefined) {
+    const lvl = logLevelRaw.toLowerCase();
+    if (isLogLevel(lvl)) logLevel = lvl;
+    else warnings.push(`MAIL_LOG_LEVEL must be one of error, warn, info, debug; got "${logLevelRaw}". Using warn.`);
+  }
+
+  const systemTz = options.systemTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
+  const tzRaw = str('MAIL_TIMEZONE');
+  let timezone = systemTz;
+  if (tzRaw !== undefined) {
+    if (isValidTimezone(tzRaw)) timezone = tzRaw;
+    else errors.push(`MAIL_TIMEZONE "${tzRaw}" is not a valid IANA time zone (for example America/Los_Angeles).`);
+  }
+
+  const mailboxOverrides: Partial<Record<SpecialFolder, string>> = {};
+  const overrideVars: Record<SpecialFolder, string> = {
+    sent: 'MAIL_SENT_MAILBOX',
+    trash: 'MAIL_TRASH_MAILBOX',
+    archive: 'MAIL_ARCHIVE_MAILBOX',
+    drafts: 'MAIL_DRAFTS_MAILBOX',
+    junk: 'MAIL_JUNK_MAILBOX',
+  };
+  for (const [kind, name] of Object.entries(overrideVars) as Array<[SpecialFolder, string]>) {
+    const v = str(name);
+    if (v !== undefined) mailboxOverrides[kind] = v;
+  }
+
+  // --- servers --------------------------------------------------------------------------------
+  const imap = {
+    host: str('IMAP_HOST') ?? 'imap.mail.me.com',
+    port: int('IMAP_PORT', 993, 1, 65_535),
+    secure: bool('IMAP_SECURE', true),
+  };
+  const smtpSecure = bool('SMTP_SECURE', false);
+  const smtp = {
+    host: str('SMTP_HOST') ?? 'smtp.mail.me.com',
+    port: int('SMTP_PORT', 587, 1, 65_535),
+    secure: smtpSecure,
+    requireTLS: smtpSecure ? false : bool('SMTP_REQUIRE_TLS', true),
+  };
+  const caRaw = str('MAIL_TLS_CA_FILE');
+  const tlsCaFile = caRaw === undefined ? undefined : expandPath(caRaw, pathCtx);
+
+  const config: Config = {
+    email,
+    password,
+    keychainService: str('ICLOUD_KEYCHAIN_SERVICE') ?? 'icloud-mail-mcp',
+    imapUser: str('ICLOUD_IMAP_USER'),
+    smtpUser,
+    fromAddress,
+    fromName: str('MAIL_FROM_NAME'),
+    allowedFrom,
+    allowSend,
+    allowPermanentDelete,
+    readOnly,
+    confirmDialog,
+    maxSendsPerHour,
+    maxRecipients,
+    attachmentDir,
+    attachFromDirs,
+    maxBodyChars,
+    maxAttachmentMb,
+    auditLog,
+    saveSentCopy,
+    operationTimeoutSeconds,
+    logLevel,
+    timezone,
+    mailboxOverrides,
+    imap,
+    smtp,
+    tlsCaFile,
+  };
+  return { config, errors, warnings };
+}
+
+/** Effective feature switches after MAIL_READ_ONLY overrides the others (SPEC §3). */
+export function effectiveFeatures(config: Config): {
+  readOnly: boolean;
+  send: boolean;
+  permanentDelete: boolean;
+  drafts: boolean;
+  mailboxChanges: boolean;
+} {
+  return {
+    readOnly: config.readOnly,
+    send: config.allowSend && !config.readOnly,
+    permanentDelete: config.allowPermanentDelete && !config.readOnly,
+    drafts: !config.readOnly,
+    mailboxChanges: !config.readOnly,
+  };
+}
+
+/** True if `address` is in the allowed From set (case-insensitive). */
+export function isAllowedFrom(config: Config, address: string): boolean {
+  const a = address.toLowerCase();
+  return config.allowedFrom.some((x) => x.toLowerCase() === a);
+}

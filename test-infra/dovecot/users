@@ -1,0 +1,6 @@
+# passwd-file for the test Dovecot (format: user:{scheme}password:uid:gid:gecos:home:shell:extra)
+# uid/gid/home are filled in by userdb default_fields in dovecot.conf.
+# Both logins map to the same mailbox (home = mail/%n, %n = local part), mirroring iCloud,
+# which accepts either the name part or the full address as the IMAP/SMTP username.
+testuser:{PLAIN}app-specific-pass::::::
+testuser@icloud.test:{PLAIN}app-specific-pass::::::

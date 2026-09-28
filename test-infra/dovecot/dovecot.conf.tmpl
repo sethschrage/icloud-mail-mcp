@@ -1,0 +1,158 @@
+## Self-contained Dovecot 2.3 config for the icloud-mail-mcp integration-test mail server.
+##
+## start.sh renders this template to dovecot/dovecot.conf, substituting:
+##   @ROOT@       absolute path of test-infra/
+##   @RUN_USER@   unprivileged user Dovecot services run as (vmail when started as root, else $USER)
+##   @RUN_GROUP@  primary group of @RUN_USER@
+##   @IMAP_PORT@ / @IMAPS_PORT@  listener ports (default 1143 plaintext+STARTTLS, 1993 implicit TLS)
+##   @INSTANCE_NAME@ @BASE_DIR@ @STATE_DIR@ @LOG_FILE@ @MAIL_DIR@
+##                per-instance names/paths (main instance: icloud-test-dovecot, run/dovecot,
+##                run/dovecot-state, logs/dovecot.log, mail/). The iCloud-fidelity profiles
+##                (scripts/profiles.sh, dovecot/profiles/*.env) render this same template with their
+##                own values, drop the special_use lines if the profile says so, and append an
+##                imap_capability override.
+##
+## It never reads /etc/dovecot. Run it with:  dovecot -c <rendered file>
+## NOTE: this is Dovecot **2.3** syntax (Ubuntu 24.04 ships 2.3.21). Dovecot 2.4 renamed many
+## settings (e.g. disable_plaintext_auth -> auth_allow_cleartext, mail_location -> mail_driver/mail_path).
+
+# ---------------------------------------------------------------- process / paths
+instance_name = @INSTANCE_NAME@
+base_dir = @BASE_DIR@
+state_dir = @STATE_DIR@
+protocols = imap
+listen = 127.0.0.1
+shutdown_clients = yes
+
+log_path = @LOG_FILE@
+info_log_path = @LOG_FILE@
+debug_log_path = @LOG_FILE@
+log_timestamp = "%Y-%m-%d %H:%M:%S "
+auth_verbose = yes
+auth_verbose_passwords = no
+# Flip to yes to trace every IMAP command in logs/dovecot.log (requires restart)
+mail_debug = no
+
+default_internal_user = @RUN_USER@
+default_internal_group = @RUN_GROUP@
+default_login_user = @RUN_USER@
+# vmail is a system account (uid < 500); allow it.
+first_valid_uid = 1
+first_valid_gid = 1
+
+# Generous so parallel test workers do not trip the per-user/IP limit (Dovecot default is 10).
+mail_max_userip_connections = 50
+
+# ---------------------------------------------------------------- TLS
+ssl = yes
+ssl_cert = <@ROOT@/certs/server.crt
+ssl_key = <@ROOT@/certs/server.key
+ssl_min_protocol = TLSv1.2
+ssl_prefer_server_ciphers = yes
+
+# ---------------------------------------------------------------- authentication
+# Tests may authenticate without TLS on port 1143 (iCloud itself only offers implicit TLS on 993).
+disable_plaintext_auth = no
+auth_mechanisms = plain login
+# Keep the username exactly as sent (lower-cased); both "testuser" and "testuser@icloud.test"
+# exist in the passwd-file and map to the same maildir (home uses %n = local part).
+auth_username_format = %Lu
+auth_failure_delay = 0 secs
+
+passdb {
+  driver = passwd-file
+  args = scheme=PLAIN @ROOT@/dovecot/users
+}
+
+userdb {
+  driver = passwd-file
+  args = @ROOT@/dovecot/users
+  default_fields = uid=@RUN_USER@ gid=@RUN_GROUP@ home=@MAIL_DIR@/%n
+}
+
+# ---------------------------------------------------------------- storage
+# Maildir with the "fs" layout so the on-disk hierarchy mirrors the IMAP "/" separator
+# (Maildir++ would use "." on disk and forbid "." inside folder names).
+mail_location = maildir:~/Maildir:LAYOUT=fs:INBOX=~/Maildir/INBOX
+
+namespace inbox {
+  type = private
+  inbox = yes
+  prefix =
+  # iCloud uses "/" as hierarchy delimiter.
+  separator = /
+  list = yes
+  subscriptions = yes
+
+  # iCloud's default folder names + RFC 6154 SPECIAL-USE attributes.
+  mailbox INBOX {
+    auto = subscribe
+  }
+  mailbox "Sent Messages" {
+    auto = subscribe
+    special_use = \Sent
+  }
+  mailbox Drafts {
+    auto = subscribe
+    special_use = \Drafts
+  }
+  mailbox "Deleted Messages" {
+    auto = subscribe
+    special_use = \Trash
+  }
+  mailbox Junk {
+    auto = subscribe
+    special_use = \Junk
+  }
+  mailbox Archive {
+    auto = subscribe
+    special_use = \Archive
+  }
+}
+
+# ---------------------------------------------------------------- quota (iCloud advertises QUOTA)
+mail_plugins = $mail_plugins quota
+plugin {
+  quota = count:User quota
+  quota_vsizes = yes
+  # iCloud free tier is 5 GB (shared across iCloud); plenty for tests.
+  quota_rule = *:storage=5G
+}
+
+# ---------------------------------------------------------------- IMAP protocol
+protocol imap {
+  mail_plugins = $mail_plugins imap_quota
+  imap_idle_notify_interval = 2 mins
+  mail_max_userip_connections = 50
+}
+
+# ---------------------------------------------------------------- listeners
+service imap-login {
+  # No chroot: lets the same config run as root or as an unprivileged user.
+  chroot =
+  inet_listener imap {
+    address = 127.0.0.1
+    port = @IMAP_PORT@
+  }
+  inet_listener imaps {
+    address = 127.0.0.1
+    port = @IMAPS_PORT@
+    ssl = yes
+  }
+  process_min_avail = 1
+}
+
+service anvil {
+  chroot =
+}
+
+service imap {
+  process_limit = 256
+}
+
+# Admin socket for `doveadm -c <conf> ...` (lives in base_dir)
+service doveadm {
+  unix_listener doveadm-server {
+    mode = 0600
+  }
+}

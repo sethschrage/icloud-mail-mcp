@@ -1,0 +1,189 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.3.schema.json",
+  "manifest_version": "0.3",
+  "name": "icloud-mail",
+  "display_name": "iCloud Mail",
+  "version": "0.1.0",
+  "description": "Let Claude read, search, organize, draft and send your iCloud Mail, with guardrails. Works alongside Apple Mail.",
+  "long_description": "Connects Claude directly to your iCloud Mail account (imap.mail.me.com and smtp.mail.me.com) with an Apple **app-specific password**. It runs locally on your Mac and works alongside Apple Mail: everything Claude changes (read, flagged, moved, archived, trashed, drafts, sent mail) syncs to Apple Mail through iCloud. Works with @icloud.com, @me.com and @mac.com addresses and with iCloud+ custom domains.\n\n**What Claude can do**\n- Search mail and read messages, conversation threads and attachments\n- Mark messages read or unread, flag them (Apple Mail colours), move, archive and trash them\n- Create, rename and delete (empty) folders\n- Save drafts that appear in Apple Mail's Drafts folder\n- Send new mail, replies and forwards\n\n**Guardrails**\n- *Sending* can be switched off entirely (drafts keep working). Each send is marked as a destructive action, so Claude asks for your approval before it runs.\n- *Permanent deletion* is off by default; deleting moves mail to Trash, which you can restore from for about 30 days.\n- *Read-only mode* lets Claude only read and search: nothing in your mailbox can change.\n- Optional *native Mac confirmation dialog*: every send and permanent delete also needs a click on a macOS dialog that Claude cannot press for you.\n- At most 30 sends per hour (adjustable) and 50 recipients per message. Mail can only be sent from your own iCloud addresses.\n- Files can be attached only from the folders you choose (Desktop, Documents and Downloads by default), and downloaded attachments are saved only into your attachment folder.\n- Email content is handed to Claude marked as untrusted data, so instructions hidden inside an email are not followed.\n- Every change is recorded in an audit log (~/Library/Logs/icloud-mail-mcp/audit.jsonl), without message bodies.\n\n**Privacy**: your app-specific password is stored in the macOS Keychain by Claude Desktop and is only ever sent to Apple's mail servers. Your mail goes straight from Apple to Claude on your Mac; this extension has no servers of its own.",
+  "author": {
+    "name": "Seth"
+  },
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/server/index.js",
+        "--attach-from-dirs",
+        "${user_config.attach_from_dirs}"
+      ],
+      "env": {
+        "ICLOUD_EMAIL": "${user_config.icloud_email}",
+        "ICLOUD_APP_PASSWORD": "${user_config.app_specific_password}",
+        "ICLOUD_IMAP_USER": "${user_config.imap_username}",
+        "MAIL_FROM_ADDRESS": "${user_config.from_address}",
+        "MAIL_FROM_NAME": "${user_config.from_name}",
+        "MAIL_ALLOWED_FROM": "${user_config.allowed_from}",
+        "MAIL_ALLOW_SEND": "${user_config.allow_send}",
+        "MAIL_ALLOW_PERMANENT_DELETE": "${user_config.allow_permanent_delete}",
+        "MAIL_READ_ONLY": "${user_config.read_only}",
+        "MAIL_CONFIRM_DIALOG": "${user_config.confirm_dialog}",
+        "MAIL_ATTACHMENT_DIR": "${user_config.attachment_dir}",
+        "MAIL_MAX_BODY_CHARS": "${user_config.max_body_chars}",
+        "MAIL_MAX_SENDS_PER_HOUR": "${user_config.max_sends_per_hour}"
+      }
+    }
+  },
+  "tools": [
+    { "name": "list_mailboxes", "description": "List your mail folders with total and unread counts" },
+    { "name": "search_messages", "description": "Search one folder or all folders by sender, recipient, subject, text, date, flags or size" },
+    { "name": "get_message", "description": "Read one email: headers, attachment list and text body" },
+    { "name": "get_thread", "description": "Find every message in the conversation an email belongs to" },
+    { "name": "get_account_info", "description": "Show the connection settings, enabled features and today's date; explains setup problems" },
+    { "name": "download_attachment", "description": "Save an attachment to your attachment folder (small images and text are shown to Claude)" },
+    { "name": "mark_messages", "description": "Mark messages read or unread, flag or unflag them, or set an Apple Mail flag colour" },
+    { "name": "move_messages", "description": "Move messages to another folder" },
+    { "name": "archive_messages", "description": "Move messages to Archive" },
+    { "name": "trash_messages", "description": "Move messages to Trash (recoverable for about 30 days)" },
+    { "name": "create_mailbox", "description": "Create a folder" },
+    { "name": "rename_mailbox", "description": "Rename or move a folder you created" },
+    { "name": "delete_mailbox", "description": "Delete an empty folder you created" },
+    { "name": "save_draft", "description": "Save a draft (new, reply or forward) to your Drafts folder without sending it" },
+    { "name": "send_email", "description": "Send a new email (only when you ask; needs your approval)" },
+    { "name": "reply_to_message", "description": "Reply or reply-all to an email (only when you ask; needs your approval)" },
+    { "name": "forward_message", "description": "Forward an email with its attachments (only when you ask; needs your approval)" },
+    { "name": "delete_messages_permanently", "description": "Permanently delete messages, bypassing Trash (off unless you allow it; cannot be undone)" }
+  ],
+  "tools_generated": false,
+  "prompts": [
+    {
+      "name": "triage_inbox",
+      "description": "Summarise unread iCloud mail from the last N days, grouped by importance, and suggest actions without taking them.",
+      "arguments": ["days"],
+      "text": "Please triage my iCloud Mail inbox: summarise the unread mail from the last ${arguments.days} days (default 7). Use only read-only tools, group the messages by importance, and suggest next steps without taking any of them until I confirm."
+    },
+    {
+      "name": "summarize_thread",
+      "description": "Summarise the email conversation a message belongs to: participants, decisions, open questions and action items.",
+      "arguments": ["mailbox", "uid"],
+      "text": "Please summarise the email conversation that contains message uid ${arguments.uid} in mailbox ${arguments.mailbox} of my iCloud Mail, using read-only tools only."
+    }
+  ],
+  "prompts_generated": false,
+  "keywords": ["email", "mail", "icloud", "apple mail", "imap", "smtp", "inbox"],
+  "license": "MIT",
+  "privacy_policies": ["https://www.apple.com/legal/privacy/"],
+  "compatibility": {
+    "platforms": ["darwin"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "user_config": {
+    "icloud_email": {
+      "type": "string",
+      "title": "iCloud email address",
+      "description": "Your primary iCloud Mail address, e.g. name@icloud.com. It is used to log in. If you use an iCloud+ custom domain, enter your @icloud.com address here and your custom-domain address under From address.",
+      "required": true
+    },
+    "app_specific_password": {
+      "type": "string",
+      "title": "App-specific password",
+      "description": "Create one at account.apple.com > Sign-In and Security > App-Specific Passwords (two-factor authentication is required). Your regular Apple Account password will not work. Stored in the macOS Keychain.",
+      "sensitive": true,
+      "required": true
+    },
+    "imap_username": {
+      "type": "string",
+      "title": "IMAP login (optional)",
+      "description": "Leave blank to log in with your iCloud email address (for @icloud.com, @me.com and @mac.com addresses the part before the @ is tried automatically if that fails). Set this only if your login is different.",
+      "required": false,
+      "default": ""
+    },
+    "from_address": {
+      "type": "string",
+      "title": "From address (optional)",
+      "description": "The address your mail is sent from, e.g. your custom-domain address or an iCloud alias. It must be an address of your iCloud account. Leave blank to send from your iCloud email address.",
+      "required": false,
+      "default": ""
+    },
+    "from_name": {
+      "type": "string",
+      "title": "Your name (optional)",
+      "description": "Display name shown to recipients, e.g. Jane Appleseed.",
+      "required": false,
+      "default": ""
+    },
+    "allowed_from": {
+      "type": "string",
+      "title": "Other From addresses (optional)",
+      "description": "Comma-separated extra addresses Claude may send from (aliases of your iCloud account). Your iCloud email and From address are always allowed; anything else is refused before sending.",
+      "required": false,
+      "default": ""
+    },
+    "allow_send": {
+      "type": "boolean",
+      "title": "Allow sending",
+      "description": "Let Claude send, reply to and forward email (it asks for your approval each time). Turn off to allow drafts only; you can then send drafts yourself from Apple Mail.",
+      "required": false,
+      "default": true
+    },
+    "allow_permanent_delete": {
+      "type": "boolean",
+      "title": "Allow permanent delete",
+      "description": "Let Claude permanently delete messages, bypassing Trash. This cannot be undone. When off, Claude can still move mail to Trash.",
+      "required": false,
+      "default": false
+    },
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-only mode",
+      "description": "Only allow reading and searching: no marking, moving, deleting, drafts or sending. Overrides the two settings above.",
+      "required": false,
+      "default": false
+    },
+    "confirm_dialog": {
+      "type": "boolean",
+      "title": "Confirm on my Mac before sending or deleting",
+      "description": "Every send and permanent delete also shows a native macOS dialog that you must click (Send or Delete) yourself. Claude cannot bypass it. If you do not answer within 2 minutes, nothing happens.",
+      "required": false,
+      "default": false
+    },
+    "attachment_dir": {
+      "type": "directory",
+      "title": "Attachment download folder",
+      "description": "Where attachments that Claude downloads are saved. Created if it does not exist. Existing files are never overwritten.",
+      "required": false,
+      "default": "${HOME}/Downloads/iCloud Mail Attachments"
+    },
+    "attach_from_dirs": {
+      "type": "directory",
+      "title": "Attach files from",
+      "description": "Folders Claude may attach files from when sending or drafting mail. Files anywhere else are refused. If you remove every folder, Desktop, Documents and Downloads are used.",
+      "required": false,
+      "multiple": true,
+      "default": ["${HOME}/Desktop", "${HOME}/Documents", "${HOME}/Downloads"]
+    },
+    "max_body_chars": {
+      "type": "number",
+      "title": "Maximum email length shown to Claude",
+      "description": "Longer message bodies are cut to this many characters to save Claude's context (1,000 to 100,000).",
+      "required": false,
+      "default": 20000,
+      "min": 1000,
+      "max": 100000
+    },
+    "max_sends_per_hour": {
+      "type": "number",
+      "title": "Maximum emails sent per hour",
+      "description": "Safety limit across sends, replies and forwards. 0 means no limit (iCloud itself allows about 1,000 per day).",
+      "required": false,
+      "default": 30,
+      "min": 0,
+      "max": 1000
+    }
+  }
+}
