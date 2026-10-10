@@ -76,6 +76,11 @@ export interface LoadConfigOptions {
 
 export const MAX_BODY_CHARS_CEILING = 100_000;
 export const ICLOUD_MAX_RECIPIENTS = 500;
+/** True for Gmail's and Google Workspace's IMAP/SMTP servers (imap.gmail.com, smtp.gmail.com). */
+export function isGmailHost(host: string | undefined): boolean {
+  return host !== undefined && /(^|\.)gmail\.com$/i.test(host.trim());
+}
+
 export const ICLOUD_DOMAINS_FOR_OWN = ['icloud.com', 'me.com', 'mac.com'] as const;
 
 /**
@@ -355,7 +360,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   if (auditRaw !== undefined && auditRaw.toLowerCase() === 'off') auditLog = null;
   else auditLog = pathValue('MAIL_AUDIT_LOG', defaultAuditLogPath(platform, home));
 
-  const saveSentCopy = bool('MAIL_SAVE_SENT_COPY', true);
+  // Gmail's SMTP server files every sent message in Sent itself, so a copy would be a duplicate.
+  const saveSentCopy = bool('MAIL_SAVE_SENT_COPY', !isGmailHost(str('IMAP_HOST')));
   const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', 120, 5, 3600, { lenient: true });
 
   const logLevelRaw = str('MAIL_LOG_LEVEL');

@@ -118,6 +118,15 @@ export function toMailboxInfo(entry: ListResponse): MailboxInfo {
   };
 }
 
+/**
+ * The server's "every message" mailbox: RFC 6154 \All, which Gmail uses for "[Gmail]/All Mail".
+ * On Gmail each label is a folder holding copies of the same messages, so this one mailbox stands
+ * in for all of them (see searchableMailboxes) and is where archived mail lives (computeSpecialMap).
+ */
+export function isAllMailbox(m: MailboxInfo): boolean {
+  return m.selectable && m.flags.some((f) => f.toLowerCase() === '\\all');
+}
+
 /** Find a mailbox by exact path, then by NFC/case-folded path, then by unique folded name. */
 function findByName(input: string, mailboxes: readonly MailboxInfo[]): MailboxInfo | null | 'ambiguous' {
   const exact = mailboxes.find((m) => m.path === input);
@@ -150,7 +159,9 @@ function findByName(input: string, mailboxes: readonly MailboxInfo[]): MailboxIn
  *    the real one);
  * 4. imapflow's name guess, for a selectable top-level folder only (a nested "Old Mail/Sent" or
  *    "Clients/Trash" is a user folder, never the special one);
- * 5. none.
+ * 5. archive only: the \All mailbox (Gmail's "[Gmail]/All Mail"), since archiving there is what
+ *    Gmail's Archive does and creating an "Archive" folder would only add a label;
+ * 6. none.
  * A mailbox is used for at most one kind.
  */
 export function computeSpecialMap(mailboxes: readonly MailboxInfo[], overrides: Partial<Record<SpecialFolder, string>>): SpecialResolution {
@@ -185,6 +196,7 @@ export function computeSpecialMap(mailboxes: readonly MailboxInfo[], overrides: 
     if (map[kind]) continue;
     take(kind, mailboxes.find((m) => free(m) && m.parentPath === '' && m.serverSpecialUse === kind));
   }
+  if (pending.includes('archive') && !map.archive) take('archive', mailboxes.find((m) => free(m) && isAllMailbox(m)));
   return { map, missingOverrides };
 }
 
@@ -430,9 +442,15 @@ export class MailboxRegistry {
     return inbox;
   }
 
-  /** Selectable mailboxes searched by all_mailboxes: everything except Trash, Junk and Notes. */
+  /**
+   * Selectable mailboxes searched by all_mailboxes: everything except Trash, Junk and Notes. With an
+   * \All mailbox (Gmail) only that one, because every other folder is a label holding copies of
+   * messages it already has, which would list each message once per label.
+   */
   async searchableMailboxes(): Promise<MailboxInfo[]> {
     const mailboxes = await this.list();
+    const all = mailboxes.find(isAllMailbox);
+    if (all) return [all];
     return mailboxes.filter((m) => m.selectable && m.specialUse !== 'trash' && m.specialUse !== 'junk' && !isNotesMailbox(m));
   }
 

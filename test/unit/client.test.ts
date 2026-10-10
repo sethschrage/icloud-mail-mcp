@@ -7,7 +7,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { CredentialProvider } from '../../src/credentials.js';
 import { MailError } from '../../src/errors.js';
-import { ImapManager, imapLoginCandidates, isConnectionError, isCredentialFailure, mapImapError, serverTextOf } from '../../src/imap/client.js';
+import { ImapManager, authFailureMessage, imapLoginCandidates, isConnectionError, isCredentialFailure, mapImapError, serverTextOf } from '../../src/imap/client.js';
 import { clearSecrets, createLogger, registerSecret } from '../../src/log.js';
 
 type Listener = (...args: unknown[]) => void;
@@ -386,5 +386,15 @@ describe('mapImapError', () => {
   it('keeps MailErrors as they are', () => {
     const me = new MailError('NOT_FOUND', 'x');
     expect(mapImapError(me, ctx)).toBe(me);
+  });
+});
+
+describe('Gmail login failures', () => {
+  it('explain Google app passwords, not Apple ones', () => {
+    const msg = authFailureMessage('IMAP', 'imap.gmail.com', ['me@gmail.com']);
+    expect(msg).toContain('Gmail IMAP (imap.gmail.com) rejected the login for "me@gmail.com"');
+    expect(msg).toContain('myaccount.google.com/apppasswords');
+    expect(msg).not.toContain('iCloud');
+    expect(authFailureMessage('IMAP', 'imap.mail.me.com', ['me@icloud.com'])).toContain('iCloud IMAP');
   });
 });

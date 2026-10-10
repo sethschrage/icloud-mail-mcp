@@ -285,3 +285,48 @@ describe('MailboxRegistry', () => {
     expect(calls).toHaveLength(2);
   });
 });
+
+describe('Gmail (\\All mailbox)', () => {
+  /** Gmail's listing: SPECIAL-USE attributes, labels as folders, everything also in "[Gmail]/All Mail". */
+  function gmailLike(): ListResponse[] {
+    return [
+      entry('INBOX'),
+      entry('Receipts'),
+      entry('[Gmail]', { flags: ['\\Noselect', '\\HasChildren'] }),
+      entry('[Gmail]/All Mail', { flags: ['\\All', '\\HasNoChildren'] }),
+      entry('[Gmail]/Drafts', { flags: ['\\Drafts'], specialUse: '\\Drafts' }),
+      entry('[Gmail]/Important', { flags: ['\\Important'] }),
+      entry('[Gmail]/Sent Mail', { flags: ['\\Sent'], specialUse: '\\Sent' }),
+      entry('[Gmail]/Spam', { flags: ['\\Junk'], specialUse: '\\Junk' }),
+      entry('[Gmail]/Starred', { flags: ['\\Flagged'] }),
+      entry('[Gmail]/Trash', { flags: ['\\Trash'], specialUse: '\\Trash' }),
+    ];
+  }
+
+  it('archives to All Mail instead of creating an Archive label', () => {
+    const { map } = computeSpecialMap(gmailLike().map(toMailboxInfo), {});
+    expect(map.archive?.path).toBe('[Gmail]/All Mail');
+    expect(map.sent?.path).toBe('[Gmail]/Sent Mail');
+    expect(map.trash?.path).toBe('[Gmail]/Trash');
+  });
+
+  it('a real Archive folder or an override still wins', () => {
+    const withArchive = computeSpecialMap([...gmailLike(), entry('Archive')].map(toMailboxInfo), {});
+    expect(withArchive.map.archive?.path).toBe('Archive');
+    const overridden = computeSpecialMap(gmailLike().map(toMailboxInfo), { archive: 'Receipts' });
+    expect(overridden.map.archive?.path).toBe('Receipts');
+  });
+
+  it('all_mailboxes searches only All Mail, so a message is not listed once per label', async () => {
+    const imap = { run: <T>(fn: (c: unknown) => Promise<T>) => fn({ list: async () => gmailLike() }) };
+    const reg = new MailboxRegistry(imap as unknown as ImapManager, { mailboxOverrides: {} } as unknown as Config);
+    expect((await reg.searchableMailboxes()).map((m) => m.path)).toEqual(['[Gmail]/All Mail']);
+    expect((await reg.excludedFromAllMailboxes()).map((m) => m.path).sort()).toEqual(['[Gmail]/Spam', '[Gmail]/Trash']);
+  });
+
+  it('without an \\All mailbox (iCloud) every folder but Trash, Junk and Notes is searched', async () => {
+    const imap = { run: <T>(fn: (c: unknown) => Promise<T>) => fn({ list: async () => [entry('INBOX'), entry('Archive'), entry('Notes'), entry('Deleted Messages', { specialUse: '\\Trash', source: 'name' })] }) };
+    const reg = new MailboxRegistry(imap as unknown as ImapManager, { mailboxOverrides: {} } as unknown as Config);
+    expect((await reg.searchableMailboxes()).map((m) => m.path)).toEqual(['INBOX', 'Archive']);
+  });
+});

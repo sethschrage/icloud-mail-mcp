@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ATTACH_FROM_DIRS_FLAG, defaultAuditLogPath, effectiveFeatures, isAllowedFrom, isUnsetValue, loadConfig, parseBoolean, parseCommandLine, parseList } from '../../src/config.js';
+import { ATTACH_FROM_DIRS_FLAG, defaultAuditLogPath, effectiveFeatures, isAllowedFrom, isGmailHost, isUnsetValue, loadConfig, parseBoolean, parseCommandLine, parseList } from '../../src/config.js';
 
 const HOME = '/Users/alex';
 const load = (env: Record<string, string | undefined>, platform: NodeJS.Platform = 'darwin') =>
@@ -258,5 +258,21 @@ describe('special folder overrides', () => {
   it('reads MAIL_*_MAILBOX overrides', () => {
     const { config } = load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_SENT_MAILBOX: 'Sent', MAIL_ARCHIVE_MAILBOX: '${user_config.archive}' });
     expect(config.mailboxOverrides).toEqual({ sent: 'Sent' });
+  });
+});
+
+describe('Gmail servers', () => {
+  it('turns off the Sent copy for Gmail, since Gmail files sent mail itself', () => {
+    expect(load({ ICLOUD_EMAIL: 'me@gmail.com', IMAP_HOST: 'imap.gmail.com', SMTP_HOST: 'smtp.gmail.com' }).config.saveSentCopy).toBe(false);
+    expect(load({ ICLOUD_EMAIL: 'me@gmail.com', IMAP_HOST: 'imap.gmail.com', MAIL_SAVE_SENT_COPY: 'true' }).config.saveSentCopy).toBe(true);
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com' }).config.saveSentCopy).toBe(true);
+  });
+
+  it('recognises only Google hosts', () => {
+    expect(isGmailHost('imap.gmail.com')).toBe(true);
+    expect(isGmailHost('SMTP.GMAIL.COM')).toBe(true);
+    expect(isGmailHost('imap.mail.me.com')).toBe(false);
+    expect(isGmailHost('notgmail.com.evil.test')).toBe(false);
+    expect(isGmailHost(undefined)).toBe(false);
   });
 });

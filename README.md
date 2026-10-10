@@ -20,6 +20,7 @@ It works with @icloud.com, @me.com and @mac.com addresses, and with iCloud+ cust
 - [Configuration reference](#configuration-reference)
 - [Manual setup without the extension file](#manual-setup-claude_desktop_configjson-and-the-keychain)
 - [Claude Code](#claude-code)
+- [Gmail accounts](#gmail-accounts)
 - [Updating and removing](#updating-and-removing)
 - [Troubleshooting](#troubleshooting)
 - [iCloud limitations](#icloud-limitations)
@@ -286,7 +287,7 @@ or contain `${HOME}`, `${DOWNLOADS}`, `${DOCUMENTS}` or `${DESKTOP}`.
 | `MAIL_MAX_BODY_CHARS` | Maximum email length shown to Claude | `20000` | Maximum characters of an email body returned by `get_message` (1–100,000); Claude can ask for less, never more. |
 | `MAIL_MAX_ATTACHMENT_MB` | – | `25` | Largest attachment `download_attachment` will save. |
 | `MAIL_AUDIT_LOG` | – | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` | Audit log file; `off` disables it. |
-| `MAIL_SAVE_SENT_COPY` | – | `true` | Save a copy of each sent email in Sent Messages (iCloud does not do this for mail sent this way). |
+| `MAIL_SAVE_SENT_COPY` | – | `true` (`false` with a Gmail server) | Save a copy of each sent email in Sent Messages (iCloud does not do this for mail sent this way). |
 | `MAIL_OPERATION_TIMEOUT_SECONDS` | – | `120` | Time limit per tool call (5–3600). |
 | `MAIL_LOG_LEVEL` | – | `warn` | Diagnostic logging: `error`, `warn`, `info` or `debug`. Never includes passwords or message text. |
 | `MAIL_TIMEZONE` | – | your Mac's | Time zone for dates, e.g. `Europe/Berlin`. |
@@ -385,6 +386,39 @@ claude mcp add --scope user icloud-mail \
 - The send and permanent-delete tools are marked destructive and ask Claude Code to get your
   approval before they run; whether it asks every time depends on your Claude Code version and
   permission settings. Set `MAIL_CONFIRM_DIALOG=true` for a check that cannot be skipped.
+
+---
+
+## Gmail accounts
+
+The same server can connect to a Gmail or Google Workspace account over IMAP, which is a way to give
+Claude a separate set of tools for each of several Gmail accounts. Add one entry per account to
+`claude_desktop_config.json`, set up as in the [manual setup](#manual-setup-claude_desktop_configjson-and-the-keychain):
+
+1. Turn on 2-Step Verification for the Google Account, then create an app password at
+   [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords).
+2. Store it in the Keychain under the Gmail address:
+   `security add-generic-password -s icloud-mail-mcp -a you@gmail.com -l "Gmail app password" -U -w`
+3. Add an entry with its own name (the name becomes the prefix of that account's tools):
+
+   ```json
+   "gmail-personal": {
+     "command": "/opt/homebrew/bin/node",
+     "args": ["/Users/jane/icloud-mail/server/index.js"],
+     "env": {
+       "ICLOUD_EMAIL": "you@gmail.com",
+       "IMAP_HOST": "imap.gmail.com",
+       "SMTP_HOST": "smtp.gmail.com",
+       "MAIL_AUDIT_LOG": "/Users/jane/Library/Logs/icloud-mail-mcp/gmail-personal.jsonl"
+     }
+   }
+   ```
+
+With a Gmail server, archiving moves mail to **[Gmail]/All Mail** (what Gmail's Archive button
+does), searches across all mailboxes look only in All Mail (every other Gmail folder is a label
+holding copies of the same messages), and no extra copy of sent mail is saved, because Gmail files
+it in Sent Mail itself. Gmail labels show up as folders: moving a message to one adds that label
+and removes it from the folder it came from.
 
 ---
 

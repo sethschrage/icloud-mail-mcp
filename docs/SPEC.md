@@ -110,12 +110,12 @@ Every value is read from env. Treat `""` and **literal unexpanded placeholders m
 | `MAIL_MAX_BODY_CHARS` | `20000` | Maximum body characters returned by `get_message` (1..100000). A call may ask for fewer, **never more**. |
 | `MAIL_MAX_ATTACHMENT_MB` | `25` | Limit for downloading attachments. Outgoing: attachment Buffers must total <= 14 MB (a 20 MB message limit after base64). |
 | `MAIL_AUDIT_LOG` | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` on darwin, `~/.local/state/icloud-mail-mcp/audit.jsonl` elsewhere | JSONL record of every write action. `off` disables it. |
-| `MAIL_SAVE_SENT_COPY` | `true` | APPEND a copy of each sent message to the Sent mailbox, because iCloud SMTP doesn't. |
+| `MAIL_SAVE_SENT_COPY` | `true` (`false` for a Gmail `IMAP_HOST`) | APPEND a copy of each sent message to the Sent mailbox, because iCloud SMTP doesn't. |
 | `MAIL_OPERATION_TIMEOUT_SECONDS` | `120` | Per-tool deadline. |
 | `MAIL_LOG_LEVEL` | `warn` | Level for stderr logging: error, warn, info or debug. |
 | `MAIL_TIMEZONE` | system | IANA timezone used when rendering dates. |
 | `MAIL_SENT_MAILBOX`, `MAIL_TRASH_MAILBOX`, `MAIL_ARCHIVE_MAILBOX`, `MAIL_DRAFTS_MAILBOX`, `MAIL_JUNK_MAILBOX` | auto | Override special-folder detection (also exposed in the extension settings). |
-| `IMAP_HOST` / `IMAP_PORT` / `IMAP_SECURE` | `imap.mail.me.com` / `993` / `true` | Server override, used for tests and other providers. With `IMAP_SECURE=false`, STARTTLS is required. |
+| `IMAP_HOST` / `IMAP_PORT` / `IMAP_SECURE` | `imap.mail.me.com` / `993` / `true` | Server override, used for tests and other providers. With `IMAP_SECURE=false`, STARTTLS is required. With a Gmail host (`*.gmail.com`), `MAIL_SAVE_SENT_COPY` defaults to `false` and login failures explain Google app passwords. On any server, an RFC 6154 `\All` mailbox (Gmail's `[Gmail]/All Mail`) is the Archive fallback before one is auto-created, and the only mailbox `all_mailboxes` searches. |
 | `IMAP_ALLOW_PLAINTEXT` | `false` | Tests only: allow a plaintext IMAP login with `IMAP_SECURE=false` (reported as a configuration warning, as is `SMTP_REQUIRE_TLS=false`). |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` | `smtp.mail.me.com` / `587` / `false` | With `SMTP_SECURE=false`, always set `requireTLS: true` unless `SMTP_REQUIRE_TLS=false`. |
 | `MAIL_TLS_CA_FILE` | – | Extra CA PEM trusted for both IMAP and SMTP. Tests use `test-infra/certs/ca.crt`. **Never** add a "disable TLS verification" option. |

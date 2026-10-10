@@ -21,7 +21,7 @@
 import { readFileSync } from 'node:fs';
 import tls from 'node:tls';
 import { ImapFlow, type ImapFlowOptions, type MailboxObject } from 'imapflow';
-import type { Config } from '../config.js';
+import { isGmailHost, type Config } from '../config.js';
 import { currentContext } from '../context.js';
 import { APP_PASSWORD_HELP, type CredentialProvider } from '../credentials.js';
 import { MailError, errorMessage } from '../errors.js';
@@ -46,6 +46,16 @@ export function imapLoginCandidates(email: string, override: string | undefined)
 
 export function authFailureMessage(service: 'IMAP' | 'SMTP', host: string, users: readonly string[], serverSaid?: string): string {
   const who = users.length ? users.map((u) => `"${u}"`).join(' and ') : 'the configured account';
+  if (isGmailHost(host)) {
+    return (
+      `Gmail ${service} (${host}) rejected the login for ${who}${serverSaid ? ` (server said: ${serverSaid})` : ''}. Likely causes: ` +
+      '(1) the regular Google Account password was used instead of an app password; ' +
+      '(2) the app password was revoked, which happens automatically when the Google Account password is changed, so create a new one; ' +
+      '(3) the login must be the full Gmail or Google Workspace address; ' +
+      '(4) app passwords require 2-Step Verification on the Google Account, and a Workspace admin can turn them off. ' +
+      'Create one at https://myaccount.google.com/apppasswords and store it in the Keychain under the service "icloud-mail-mcp" with the address as the account.'
+    );
+  }
   const customDomain =
     'custom-domain users: enter your primary @icloud.com address as "iCloud email address" in the extension settings and your custom address as "From address (optional)" (manual setups: ICLOUD_EMAIL / MAIL_FROM_ADDRESS)';
   const loginHint =
