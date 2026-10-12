@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { promises as fsp, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
@@ -121,12 +121,20 @@ describe('audit log', () => {
 
   it('gives up on a wedged write after the timeout and keeps later entries flowing', async () => {
     const warnings: string[] = [];
-    // Node's recursive mkdir never settles under /proc on Linux: a handy stand-in for a hung filesystem.
-    const hung = new AuditLog('/proc/definitely/not/writable/audit.jsonl', createLogger({ sink: (l) => warnings.push(l) }), 200);
+    const file = path.join(dir, 'hung', 'audit.jsonl');
+    const hung = new AuditLog(file, createLogger({ sink: (l) => warnings.push(l) }), 200);
+    // A hung filesystem: appends that never settle.
+    const append = vi.spyOn(fsp, 'appendFile').mockImplementation(() => new Promise<void>(() => {}));
     const started = Date.now();
-    await hung.record({ tool: 't', result: 'ok' });
-    await hung.record({ tool: 't2', result: 'ok' });
+    try {
+      await hung.record({ tool: 't', result: 'ok' });
+      await hung.record({ tool: 't2', result: 'ok' });
+    } finally {
+      append.mockRestore();
+    }
     expect(Date.now() - started).toBeLessThan(5000);
     expect(warnings.join('')).toMatch(/timed out/);
+    await hung.record({ tool: 't3', result: 'ok' });
+    expect(readFileSync(file, 'utf8')).toContain('"tool":"t3"');
   });
 });

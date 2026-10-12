@@ -148,7 +148,8 @@ describe('confinement of attachment paths', () => {
 
   it('rejects traversal out of the allowed dir', async () => {
     expect(await rejectCode(resolveAllowedFile(path.join(allowed, '..', 'private', 'secret.txt'), [allowed]))).toBe('FORBIDDEN');
-    expect(await rejectCode(resolveAllowedFile('/etc/hostname', [allowed]))).toBe('FORBIDDEN');
+    // An existing file elsewhere, by absolute path. (A missing one is NOT_FOUND: the path is realpath'd first.)
+    expect(await rejectCode(resolveAllowedFile(path.join(root, 'private', 'secret.txt'), [allowed]))).toBe('FORBIDDEN');
   });
 
   it('rejects symlinks that escape the allowed dir', async () => {
