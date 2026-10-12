@@ -21,6 +21,7 @@ export interface AuditEntry {
   [key: string]: unknown;
 }
 
+/** `filePath` may also be 'stdout' or 'stderr' (cloud version: the Vercel logs). */
 export class AuditLog {
   private queue: Promise<void> = Promise.resolve();
 
@@ -39,6 +40,16 @@ export class AuditLog {
     const file = this.filePath;
     if (!file) return Promise.resolve();
     const line = `${redact(JSON.stringify({ ts: new Date().toISOString(), ...entry }, jsonReplacer))}\n`;
+    if (file === 'stdout' || file === 'stderr') {
+      // Cloud version: the Vercel logs are the audit log. One JSON line per entry, tagged so it can
+      // be filtered (search the logs for "icloud-mail-audit").
+      try {
+        (file === 'stdout' ? process.stdout : process.stderr).write(`icloud-mail-audit ${line}`);
+      } catch (err) {
+        this.logger.warn('could not write the audit log', { file, err });
+      }
+      return Promise.resolve();
+    }
     const append = async (): Promise<void> => {
       await fsp.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
       await fsp.appendFile(file, line, { encoding: 'utf8', mode: 0o600, flag: 'a' });

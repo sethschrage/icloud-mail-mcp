@@ -334,15 +334,18 @@ describe('get_thread', () => {
   });
 });
 
+/** The local version always saves the file, so `path` is set. */
+type LocalDownload = Awaited<ReturnType<MailService['downloadAttachment']>> & { path: string };
+
 describe('download_attachment', () => {
   it('saves under the sanitised filename and never overwrites', async () => {
-    const a = await svc.downloadAttachment({ mailbox: 'INBOX', uid: 6, part: '2' });
+    const a = (await svc.downloadAttachment({ mailbox: 'INBOX', uid: 6, part: '2' })) as LocalDownload;
     expect(path.basename(a.path)).toBe('Invoice-10423.pdf');
     expect(a.content_type).toBe('application/pdf');
     expect(readFileSync(a.path).subarray(0, 5).toString('latin1')).toBe('%PDF-');
     expect(a.content).toBeUndefined();
     expect(a.note).toMatch(/Saved to/);
-    const b = await svc.downloadAttachment({ mailbox: 'INBOX', uid: 6, part: '2' });
+    const b = (await svc.downloadAttachment({ mailbox: 'INBOX', uid: 6, part: '2' })) as LocalDownload;
     expect(path.basename(b.path)).toBe('Invoice-10423 (1).pdf');
     expect(existsSync(a.path)).toBe(true);
     expect(b.size).toBe(a.size);
@@ -358,7 +361,7 @@ describe('download_attachment', () => {
   });
 
   it('uses a fallback name for attachments without a filename and keeps non-ASCII names', async () => {
-    const rfc822 = await svc.downloadAttachment({ mailbox: 'INBOX', uid: 21, part: '2', returnContent: false });
+    const rfc822 = (await svc.downloadAttachment({ mailbox: 'INBOX', uid: 21, part: '2', returnContent: false })) as LocalDownload;
     expect(rfc822.filename).toBe('attachment-21-2.eml');
     expect(readFileSync(rfc822.path, 'utf8')).toMatch(/Subject:/i);
     const resume = await svc.downloadAttachment({ mailbox: 'INBOX', uid: 20, part: '2', returnContent: false });

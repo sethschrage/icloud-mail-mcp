@@ -79,7 +79,10 @@ describe('logger', () => {
       .filter((l) => l && !/^\S+:\d+:\s*(\/\/|\*|\/\*)/.test(l))
       // index.ts redirects these console methods to stderr (assignment, not a call) and listens
       // for EPIPE on stdout; neither writes to stdout.
-      .filter((l) => !/^\S+\/src\/index\.ts:\d+:\s*(console\.(log|info|debug) = toStderr;|process\.stdout\.on\('error',)/.test(l));
+      .filter((l) => !/^\S+\/src\/index\.ts:\d+:\s*(console\.(log|info|debug) = toStderr;|process\.stdout\.on\('error',)/.test(l))
+      // The cloud version's audit sink (MAIL_AUDIT_LOG=stdout, i.e. the Vercel logs). loadConfig
+      // refuses "stdout" for the local stdio server, where stdout carries the MCP protocol.
+      .filter((l) => !/^\S+\/src\/audit\.ts:\d+:\s*\(file === 'stdout' \? process\.stdout : process\.stderr\)\.write\(/.test(l));
     expect(offending).toEqual([]);
   });
 });

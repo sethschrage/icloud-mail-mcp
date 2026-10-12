@@ -5,6 +5,7 @@
  * only on darwin. The resolved password is cached for the process lifetime and registered with the
  * logger's redaction list.
  */
+import { getRuntime } from './runtime.js';
 import { execFile, type ChildProcess } from 'node:child_process';
 import type { Config } from './config.js';
 import { MailError } from './errors.js';
@@ -15,6 +16,15 @@ export const APP_PASSWORD_HELP =
   'Create an app-specific password at account.apple.com → Sign-In and Security → App-Specific Passwords, then either set it as ' +
   'ICLOUD_APP_PASSWORD (the "App-specific password" field in the extension settings) or store it in the macOS Keychain with: ' +
   'security add-generic-password -s icloud-mail-mcp -a <your iCloud email> -U -w';
+
+/** Cloud version: the password comes from connector headers or the Vercel env, never the Keychain. */
+export const CLOUD_PASSWORD_HELP =
+  'Create an app-specific password at account.apple.com → Sign-In and Security → App-Specific Passwords, then either send it in the X-ICloud-Password connector header or set ICLOUD_PASSWORD (Sensitive, Production) in the Vercel project\'s environment variables and redeploy.';
+
+/** The password help for this runtime. */
+export function passwordHelp(): string {
+  return getRuntime() === 'cloud' ? CLOUD_PASSWORD_HELP : APP_PASSWORD_HELP;
+}
 
 export type ExecFileResult = { stdout: string; stderr: string; code: number | null; error?: NodeJS.ErrnoException & { killed?: boolean } };
 export type ExecFileFn = (file: string, args: readonly string[], options: { timeoutMs: number; signal?: AbortSignal | undefined }) => Promise<ExecFileResult>;
@@ -64,6 +74,8 @@ export interface CredentialOptions {
   securityPath?: string;
   timeoutMs?: number;
   exec?: ExecFileFn;
+  /** How get_account_info describes the password's origin (cloud: connector header or Vercel env). */
+  sourceLabel?: string;
 }
 
 export interface ResolvedPassword {
@@ -78,6 +90,7 @@ export class CredentialProvider {
   private readonly securityPath: string;
   private readonly timeoutMs: number;
   private readonly exec: ExecFileFn;
+  private readonly sourceLabel: string | undefined;
 
   constructor(
     private readonly config: Pick<Config, 'email' | 'password' | 'keychainService' | 'imapUser' | 'smtpUser'>,
@@ -87,10 +100,12 @@ export class CredentialProvider {
     this.securityPath = options.securityPath ?? '/usr/bin/security';
     this.timeoutMs = options.timeoutMs ?? 15_000;
     this.exec = options.exec ?? defaultExecFile;
+    this.sourceLabel = options.sourceLabel;
   }
 
   /** Where the password will come from, without reading it (for get_account_info). */
   describeSource(): string {
+    if (this.sourceLabel) return this.sourceLabel;
     if (this.config.password) return 'ICLOUD_APP_PASSWORD environment variable';
     if (this.platform === 'darwin') return `macOS Keychain (service "${this.config.keychainService}", account "${this.config.email}")`;
     return 'none configured (ICLOUD_APP_PASSWORD is not set and the Keychain is only available on macOS)';

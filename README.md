@@ -20,6 +20,7 @@ It works with @icloud.com, @me.com and @mac.com addresses, and with iCloud+ cust
 - [Configuration reference](#configuration-reference)
 - [Manual setup without the extension file](#manual-setup-claude_desktop_configjson-and-the-keychain)
 - [Claude Code](#claude-code)
+- [Cloud version (Vercel)](#cloud-version-vercel)
 - [Updating and removing](#updating-and-removing)
 - [Troubleshooting](#troubleshooting)
 - [iCloud limitations](#icloud-limitations)
@@ -285,7 +286,7 @@ or contain `${HOME}`, `${DOWNLOADS}`, `${DOCUMENTS}` or `${DESKTOP}`.
 | `MAIL_ATTACH_FROM_DIRS` | Attach files from | `~/Desktop,~/Documents,~/Downloads` | Comma-separated folders files may be attached from; `none` switches local-file attachments off. The settings form passes its folders as command-line arguments (`--attach-from-dirs <folder>…`), which take precedence over this variable. |
 | `MAIL_MAX_BODY_CHARS` | Maximum email length shown to Claude | `20000` | Maximum characters of an email body returned by `get_message` (1–100,000); Claude can ask for less, never more. |
 | `MAIL_MAX_ATTACHMENT_MB` | – | `25` | Largest attachment `download_attachment` will save. |
-| `MAIL_AUDIT_LOG` | – | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` | Audit log file; `off` disables it. |
+| `MAIL_AUDIT_LOG` | – | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` | Audit log file; `off` disables it, `stderr` writes it to the server log instead (cloud version: `stdout`, the Vercel logs, is the default). |
 | `MAIL_SAVE_SENT_COPY` | – | `true` | Save a copy of each sent email in Sent Messages (iCloud does not do this for mail sent this way). |
 | `MAIL_OPERATION_TIMEOUT_SECONDS` | – | `120` | Time limit per tool call (5–3600). |
 | `MAIL_LOG_LEVEL` | – | `warn` | Diagnostic logging: `error`, `warn`, `info` or `debug`. Never includes passwords or message text. |
@@ -295,6 +296,16 @@ or contain `${HOME}`, `${DOWNLOADS}`, `${DOCUMENTS}` or `${DESKTOP}`.
 | `IMAP_ALLOW_PLAINTEXT` | – | `false` | Tests only: with `IMAP_SECURE=false`, allow a login without encryption (reported as a configuration warning). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_REQUIRE_TLS` | – | `smtp.mail.me.com`, `587`, `false`, `true` | SMTP server (for testing). STARTTLS is required unless `SMTP_REQUIRE_TLS=false`. |
 | `MAIL_TLS_CA_FILE` | – | – | Extra certificate authority to trust (for testing). Certificate checking can never be turned off. |
+
+Only for the [cloud version](#cloud-version-vercel) (set in the Vercel project, see [docs/CLOUD.md](docs/CLOUD.md)):
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `MCP_ACCESS_KEY` | **required** | Access key (32+ characters) every request must carry as `?key=` or `Authorization: Bearer`. Without it, every request is refused. |
+| `ICLOUD_PASSWORD` | – | The app-specific password (same as `ICLOUD_APP_PASSWORD`, which also works). Connector headers `X-ICloud-Email` / `X-ICloud-Password` take precedence. |
+| `KV_REST_API_URL`, `KV_REST_API_TOKEN` | – | Upstash Redis for the shared send limits, as set by Vercel's Upstash for Redis integration. |
+| `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN` | – | The same, under Upstash's own names (they take precedence). |
+| `MAIL_RATE_LIMIT_STORE` | `upstash` | `memory` counts send limits per Vercel instance instead (they then reset whenever Vercel starts a new instance). Without either, sending is refused until Upstash is configured. |
 
 If a value is invalid, the server still starts, and every mail tool explains exactly which setting
 to fix, naming the field in the settings form. A number with decimals is rounded (with a warning)
@@ -385,6 +396,29 @@ claude mcp add --scope user icloud-mail \
 - The send and permanent-delete tools are marked destructive and ask Claude Code to get your
   approval before they run; whether it asks every time depends on your Claude Code version and
   permission settings. Set `MAIL_CONFIRM_DIALOG=true` for a check that cannot be skipped.
+
+---
+
+## Cloud version (Vercel)
+
+The same server can also run on Vercel, so Claude can reach your mail from claude.ai or your phone
+while your Mac is off. It is a second entry point in this repository (`api/icloud-mail.js`); the
+Mac extension is unchanged. The differences:
+
+- **Access:** every request needs an access key. You add the server in Claude as a custom
+  connector, with the key in its URL.
+- **Password:** your app-specific password is stored as a Sensitive Vercel environment variable
+  (or sent by the connector).
+- **No disk:** attachments are shown inline instead of being saved, and files cannot be attached
+  from disk. Share files with a link from another connector, or forward an email with its
+  attachments.
+- **No Mac dialog:** there is no confirmation dialog. Claude still asks for your approval before
+  every send.
+- **Shared limits:** send limits are kept in Upstash Redis, so they hold across Vercel's
+  instances.
+- **Audit trail:** it goes to the Vercel logs.
+
+Setup, environment variables and the connector URL: **[docs/CLOUD.md](docs/CLOUD.md)**.
 
 ---
 

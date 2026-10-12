@@ -5,7 +5,7 @@
  * inside a fetch iterator (only `fetchAll`/`fetchOne`/`download` are used).
  */
 import { unlink, type FileHandle } from 'node:fs/promises';
-import { Transform, type Readable } from 'node:stream';
+import { Transform, Writable, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { FetchMessageObject, ImapFlow, MessageAddressObject, MessageStructureObject } from 'imapflow';
 import { MailError } from '../errors.js';
@@ -522,6 +522,47 @@ export async function downloadPartToDir(
     // A local file-system problem (macOS privacy denial, full disk, bad folder) is not an IMAP error.
     throw attachmentSaveError(err, options.dir) ?? err;
   }
+}
+
+/**
+ * Cloud version (no disk): read one attachment part into memory instead of saving it.
+ * `captureFor(contentType)` says how many bytes of content are worth returning for that type
+ * (0 = none: the part is not downloaded at all, and `size` is estimated from the structure).
+ * `path` is always ''.
+ */
+export async function downloadPartToMemory(
+  client: ImapFlow,
+  mailbox: string,
+  uid: number,
+  part: string,
+  options: { maxBytes: number; captureFor: (contentType: string) => number },
+): Promise<DownloadedFile> {
+  const { node, info, messageId } = await resolveAttachmentPart(client, mailbox, uid, part);
+  const estimate = estimateDecodedSize(info, node.encoding);
+  if (estimate > options.maxBytes) {
+    throw new MailError(
+      'TOO_LARGE',
+      `Attachment part ${part} is about ${formatSize(estimate)}, above the MAIL_MAX_ATTACHMENT_MB limit (${formatSize(options.maxBytes)}).`,
+    );
+  }
+  const filename = sanitizeFilename(info.filename) ?? fallbackAttachmentName(uid, part, info.content_type);
+  const base: DownloadedFile = { path: '', filename, size: estimate, content_type: info.content_type, charset: node.parameters?.['charset'] ?? null, messageId };
+  const captureUpTo = options.captureFor(info.content_type);
+  // Too big to return (the estimate is close: base64 is decoded, quoted-printable only shrinks).
+  if (captureUpTo <= 0 || estimate > captureUpTo * 1.05) return base;
+  const dl = await client.download(String(uid), part, { uid: true, maxBytes: options.maxBytes + 1, chunkSize: 256 * 1024 });
+  if (!dl.content) throw new MailError('NOT_FOUND', `Part ${part} of message ${uid} could not be downloaded.`);
+  const limiter = new ByteLimiter(options.maxBytes, captureUpTo);
+  const discard = new Writable({ write: (_chunk, _enc, cb) => cb() });
+  try {
+    await pipeline(dl.content, limiter, discard);
+  } catch (err) {
+    dl.content.destroy();
+    throw err;
+  }
+  const result: DownloadedFile = { ...base, size: limiter.total, charset: dl.meta?.charset ?? base.charset };
+  if (limiter.captured) result.content = Buffer.concat(limiter.captured);
+  return result;
 }
 
 export interface AttachmentBuffer {

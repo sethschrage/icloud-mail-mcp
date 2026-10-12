@@ -1,0 +1,7 @@
+# Not needed to build or run the cloud function (see docs/CLOUD.md)
+node_modules
+test-infra
+test
+coverage
+dist
+*.mcpb

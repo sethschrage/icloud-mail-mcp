@@ -18,7 +18,9 @@
     "test": "npm run test:unit && npm run test:integration",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
-    "test:e2e": "vitest run --project integration test/integration/e2e-"
+    "test:e2e": "vitest run --project integration test/integration/e2e-",
+    "build:vercel": "node scripts/build-vercel.mjs",
+    "vercel-build": "node scripts/build-vercel.mjs --skip-typecheck"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.1.0",

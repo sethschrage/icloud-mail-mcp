@@ -10,10 +10,26 @@ import path from 'node:path';
 import { PATH_VARIABLES, expandPath, type PathContext } from './safety/paths.js';
 import { isLogLevel, type LogLevel } from './log.js';
 import { isValidEmailAddress } from './smtp/address.js';
+import { getRuntime, type Runtime } from './runtime.js';
 
 export type SpecialFolder = 'sent' | 'trash' | 'archive' | 'drafts' | 'junk';
 
+/**
+ * Where send and recipient limits are counted (cloud only):
+ * - none: local server; the in-process limiters are the whole story (one process per user).
+ * - upstash: an Upstash Redis REST endpoint shared by every Vercel instance.
+ * - memory: explicitly per instance (MAIL_RATE_LIMIT_STORE=memory); limits reset when Vercel starts a fresh instance.
+ * - missing: cloud with sending on but no store configured; sends are refused until one is added.
+ */
+export type QuotaStoreConfig =
+  | { kind: 'none' }
+  | { kind: 'upstash'; url: string; token: string }
+  | { kind: 'memory' }
+  | { kind: 'missing' };
+
 export interface Config {
+  /** 'local' (stdio, Claude Desktop/Code) or 'cloud' (HTTP on Vercel); see runtime.ts. */
+  runtime: Runtime;
   email: string;
   /** App-specific password from ICLOUD_APP_PASSWORD (undefined => Keychain lookup). */
   password: string | undefined;
@@ -44,8 +60,10 @@ export interface Config {
   attachFromDirs: string[];
   maxBodyChars: number;
   maxAttachmentMb: number;
-  /** null when MAIL_AUDIT_LOG=off. */
+  /** File path, 'stdout'/'stderr' (cloud default: stdout, i.e. the Vercel logs), or null when MAIL_AUDIT_LOG=off. */
   auditLog: string | null;
+  /** Shared send/recipient limit store (cloud); { kind: 'none' } locally. */
+  quotaStore: QuotaStoreConfig;
   saveSentCopy: boolean;
   operationTimeoutSeconds: number;
   logLevel: LogLevel;
@@ -72,6 +90,8 @@ export interface LoadConfigOptions {
   systemTimezone?: string;
   /** Command-line arguments after the script path (`process.argv.slice(2)`); see parseCommandLine. */
   argv?: readonly string[];
+  /** Defaults to the process runtime (runtime.ts). */
+  runtime?: Runtime;
 }
 
 export const MAX_BODY_CHARS_CEILING = 100_000;
@@ -108,6 +128,8 @@ export const SETTING_LABELS: Readonly<Record<string, string>> = {
 
 /** `"<settings title>" (ENV_VAR)` for env vars that have a settings field, else just the env var. */
 export function settingName(envVar: string): string {
+  // The cloud version has no settings form: its settings are the env vars themselves.
+  if (getRuntime() === 'cloud') return envVar;
   const label = SETTING_LABELS[envVar];
   return label ? `"${label}" (${envVar})` : envVar;
 }
@@ -201,6 +223,8 @@ export function defaultAuditLogPath(platform: NodeJS.Platform, home: string): st
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadConfigOptions = {}): ConfigResult {
+  const runtime = options.runtime ?? getRuntime();
+  const cloud = runtime === 'cloud';
   const platform = options.platform ?? process.platform;
   const home = options.home ?? os.homedir();
   const pathCtx: PathContext = { home };
@@ -282,14 +306,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   let email = '';
   if (emailRaw === undefined) {
     errors.push(
-      'ICLOUD_EMAIL is not set. Set it to your iCloud Mail address (for example you@icloud.com) as "iCloud email address" in the extension settings, or in the server env.',
+      cloud
+        ? CLOUD_NO_LOGIN
+        : 'ICLOUD_EMAIL is not set. Set it to your iCloud Mail address (for example you@icloud.com) as "iCloud email address" in the extension settings, or in the server env.',
     );
   } else {
     email = address('ICLOUD_EMAIL', emailRaw) ?? '';
   }
 
   // Passed exactly as given (with or without hyphens); only surrounding whitespace from pasting is dropped.
-  const password = str('ICLOUD_APP_PASSWORD');
+  // The cloud version also accepts ICLOUD_PASSWORD (the name the other Vercel MCP servers use).
+  const password = str('ICLOUD_APP_PASSWORD') ?? (cloud ? str('ICLOUD_PASSWORD') : undefined);
+  // There is no Keychain in the cloud, so a missing password is a configuration error up front.
+  if (cloud && password === undefined && emailRaw !== undefined) errors.push(CLOUD_NO_LOGIN);
   const fromAddress = address('MAIL_FROM_ADDRESS', str('MAIL_FROM_ADDRESS')) ?? email;
   const imapUser = str('ICLOUD_IMAP_USER');
   // A full address in the IMAP login (the @icloud.com login of a custom-domain user) is the SMTP
@@ -320,20 +349,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   const readOnly = bool('MAIL_READ_ONLY', false);
   const allowSend = bool('MAIL_ALLOW_SEND', true);
   const allowPermanentDelete = bool('MAIL_ALLOW_PERMANENT_DELETE', false);
-  const confirmDialog = bool('MAIL_CONFIRM_DIALOG', false);
+  let confirmDialog = bool('MAIL_CONFIRM_DIALOG', false);
+  if (cloud && confirmDialog) {
+    // Refuse rather than ignore: whoever set it expects sends to wait for a click that can never come.
+    errors.push('MAIL_CONFIRM_DIALOG cannot be used in the cloud version (the confirmation dialog only exists on a Mac). Remove it; Claude still asks for approval before each send.');
+    confirmDialog = false;
+  }
   const maxSendsPerHour = int('MAIL_MAX_SENDS_PER_HOUR', 30, 0, 100_000, { lenient: true });
   const maxRecipients = int('MAIL_MAX_RECIPIENTS', 50, 1, ICLOUD_MAX_RECIPIENTS, { lenient: true });
   const maxRecipientsPerHour = int('MAIL_MAX_RECIPIENTS_PER_HOUR', 150, 0, 100_000, { lenient: true });
   const maxRecipientsPerDay = int('MAIL_MAX_RECIPIENTS_PER_DAY', 500, 0, 100_000, { lenient: true });
 
   // --- files ----------------------------------------------------------------------------------
-  const attachmentDir = pathValue('MAIL_ATTACHMENT_DIR', '~/Downloads/iCloud Mail Attachments');
+  // The cloud version has no disk to save to or attach from: attachments are returned inline.
+  const attachmentDir = cloud ? '' : pathValue('MAIL_ATTACHMENT_DIR', '~/Downloads/iCloud Mail Attachments');
+  if (cloud) {
+    for (const name of ['MAIL_ATTACHMENT_DIR', 'MAIL_ATTACH_FROM_DIRS']) {
+      if (str(name) !== undefined) warnings.push(`${name} is ignored in the cloud version: there is no local disk (attachments are returned inline, and files cannot be attached from disk).`);
+    }
+  }
   // Folders chosen in the extension settings arrive as arguments and take precedence over the env list.
   const attachFromRaw = str('MAIL_ATTACH_FROM_DIRS');
   let attachFromSource: { name: string; dirs: string[] };
   if (cli.attachFromDirs.length > 0) attachFromSource = { name: `The "Attach files from" folders (${ATTACH_FROM_DIRS_FLAG})`, dirs: cli.attachFromDirs };
   else if (attachFromRaw !== undefined) attachFromSource = { name: 'MAIL_ATTACH_FROM_DIRS entries', dirs: parseList(attachFromRaw) };
   else attachFromSource = { name: 'Default attachment folders', dirs: ['~/Desktop', '~/Documents', '~/Downloads'] };
+  if (cloud) attachFromSource = { name: 'Attachment folders', dirs: [] };
   const attachFromDirs: string[] = [];
   // "none" (alone) switches local-file attachments off entirely; an empty list cannot, because
   // Claude Desktop sends nothing for a cleared folder setting and the defaults then apply.
@@ -352,11 +393,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
 
   const auditRaw = str('MAIL_AUDIT_LOG');
   let auditLog: string | null;
-  if (auditRaw !== undefined && auditRaw.toLowerCase() === 'off') auditLog = null;
-  else auditLog = pathValue('MAIL_AUDIT_LOG', defaultAuditLogPath(platform, home));
+  const auditKeyword = auditRaw?.toLowerCase();
+  if (auditKeyword === 'off') auditLog = null;
+  else if (auditKeyword === 'stdout' && !cloud) {
+    // Locally stdout carries the MCP protocol itself; an audit line there would corrupt it.
+    errors.push('MAIL_AUDIT_LOG=stdout is only available in the cloud version (locally stdout carries the MCP protocol). Use a file path, "stderr" or "off".');
+    auditLog = null;
+  } else if (auditKeyword === 'stdout' || auditKeyword === 'stderr') auditLog = auditKeyword;
+  else if (cloud) {
+    // Vercel keeps what a function prints in its logs; there is no persistent file system.
+    if (auditRaw !== undefined) warnings.push(`MAIL_AUDIT_LOG="${auditRaw}" is not available in the cloud version (no persistent disk); audit entries go to the Vercel logs (stdout).`);
+    auditLog = 'stdout';
+  } else auditLog = pathValue('MAIL_AUDIT_LOG', defaultAuditLogPath(platform, home));
+
+  // --- shared send limits (cloud) -------------------------------------------------------------
+  let quotaStore: QuotaStoreConfig = { kind: 'none' };
+  if (cloud) {
+    const storeRaw = str('MAIL_RATE_LIMIT_STORE')?.toLowerCase();
+    // The Vercel Marketplace's Upstash integration injects KV_REST_API_*; Upstash's own docs use UPSTASH_REDIS_REST_*.
+    const url = str('UPSTASH_REDIS_REST_URL') ?? str('KV_REST_API_URL');
+    const token = str('UPSTASH_REDIS_REST_TOKEN') ?? str('KV_REST_API_TOKEN');
+    if (storeRaw !== undefined && storeRaw !== 'memory' && storeRaw !== 'upstash') {
+      errors.push(`MAIL_RATE_LIMIT_STORE must be "upstash" or "memory"; got "${storeRaw}".`);
+    }
+    if (storeRaw === 'memory') quotaStore = { kind: 'memory' };
+    else if (url && token) {
+      if (!/^https:\/\/[^\s/]+/i.test(url)) errors.push('UPSTASH_REDIS_REST_URL (or KV_REST_API_URL) must be an https:// URL.');
+      else quotaStore = { kind: 'upstash', url: url.replace(/\/+$/, ''), token };
+    } else quotaStore = { kind: 'missing' };
+  }
 
   const saveSentCopy = bool('MAIL_SAVE_SENT_COPY', true);
-  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', 120, 5, 3600, { lenient: true });
+  // In the cloud the Vercel function's own limit (vercel.json maxDuration, 60 s) must come later.
+  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', cloud ? 50 : 120, 5, 3600, { lenient: true });
 
   const logLevelRaw = str('MAIL_LOG_LEVEL');
   let logLevel: LogLevel = 'warn';
@@ -369,6 +438,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   const systemTz = options.systemTimezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? 'UTC';
   const tzRaw = str('MAIL_TIMEZONE');
   let timezone = systemTz;
+  if (cloud && tzRaw === undefined) warnings.push(`MAIL_TIMEZONE is not set, so dates are shown in ${systemTz} (the server's zone). Set it to your time zone, for example America/Los_Angeles.`);
   if (tzRaw !== undefined) {
     if (isValidTimezone(tzRaw)) timezone = tzRaw;
     else errors.push(`MAIL_TIMEZONE "${tzRaw}" is not a valid IANA time zone (for example America/Los_Angeles).`);
@@ -411,6 +481,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   const tlsCaFile = caRaw === undefined ? undefined : expandPath(caRaw, pathCtx);
 
   const config: Config = {
+    runtime,
     email,
     password,
     keychainService: str('ICLOUD_KEYCHAIN_SERVICE') ?? 'icloud-mail-mcp',
@@ -433,6 +504,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     maxBodyChars,
     maxAttachmentMb,
     auditLog,
+    quotaStore,
     saveSentCopy,
     operationTimeoutSeconds,
     logLevel,
@@ -444,6 +516,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   };
   return { config, errors, warnings };
 }
+
+/** Config error for a cloud deployment with no iCloud login (headers or env). */
+export const CLOUD_NO_LOGIN =
+  'No iCloud login was provided. Either add the headers X-ICloud-Email (your iCloud Mail address) and X-ICloud-Password (an app-specific password) to the connector, or set ICLOUD_EMAIL and ICLOUD_PASSWORD (Sensitive, Production) in the Vercel project\'s environment variables. Create the app-specific password at account.apple.com > Sign-In and Security > App-Specific Passwords.';
 
 /** Effective feature switches after MAIL_READ_ONLY overrides the others (SPEC §3). */
 export function effectiveFeatures(config: Config): {

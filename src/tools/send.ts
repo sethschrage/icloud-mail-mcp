@@ -12,7 +12,10 @@ import { renderJson } from '../render.js';
 import {
   REQUIRES_USER_INTERACTION_META,
   SEND_HINTS,
+  CLOUD_ATTACHMENTS_NOTE,
   addressListField,
+  forRuntime,
+  isCloud,
   annotations,
   attachmentsField,
   auditRecipients,
@@ -38,8 +41,11 @@ function sendWarning(what: string, askedTo: string, draftAlternative: string): s
   );
 }
 
-const SEND_FOOTER =
-  'A copy is saved to Sent. Sends and recipients are limited per hour and day, and a confirmation dialog on the Mac may need a click (if the user cancels there, the result says it was not sent).';
+function sendFooter(rt: ToolRuntime): string {
+  return isCloud(rt)
+    ? 'A copy is saved to Sent. Sends and recipients are limited per hour and day.'
+    : 'A copy is saved to Sent. Sends and recipients are limited per hour and day, and a confirmation dialog on the Mac may need a click (if the user cancels there, the result says it was not sent).';
+}
 
 export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
   const { service } = rt;
@@ -52,11 +58,13 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
       description: [
         sendWarning('EMAIL', 'send an email', 'save_draft'),
         'Composes and sends a new email. to/cc/bcc take "user@example.com" or "Name <user@example.com>" (Bcc recipients are hidden from the others). body is plain text; html is optional.',
-        'Attachments: local files inside the allowed attachment folders (see the attachments parameter). from must be one of the account\'s allowed addresses.',
-        SEND_FOOTER,
+        isCloud(rt)
+          ? `${CLOUD_ATTACHMENTS_NOTE} from must be one of the account's allowed addresses.`
+          : 'Attachments: local files inside the allowed attachment folders (see the attachments parameter). from must be one of the account\'s allowed addresses.',
+        sendFooter(rt),
         'Returns the Message-ID, accepted and rejected recipients, and whether the Sent copy was saved.',
       ].join(' '),
-      inputSchema: z.strictObject({
+      inputSchema: forRuntime(rt, z.strictObject({
         to: addressListField('To recipients (at least one)').min(1),
         cc: addressListField('Cc recipients').optional(),
         bcc: addressListField('Bcc recipients (hidden from the other recipients)').optional(),
@@ -71,7 +79,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
           .max(998)
           .describe('Optional Reply-To address ("user@example.com" or "Name <user@example.com>") where replies should go instead of the From address.')
           .optional(),
-      }),
+      })),
       annotations: annotations(sendTitle, SEND_HINTS),
       _meta: { ...REQUIRES_USER_INTERACTION_META },
     },
@@ -113,9 +121,10 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
         sendWarning('REPLY', 'send a reply', 'save_draft with reply_to'),
         'Replies to the email identified by mailbox + uid. Recipients are filled in automatically: the original Reply-To or sender, and with reply_all also the original To and Cc, minus the user\'s own addresses; cc/bcc add more.',
         'The subject gets "Re:", threading headers (In-Reply-To, References) are set, and the original text is quoted below body. The original is marked as answered and read.',
-        SEND_FOOTER,
+        ...(isCloud(rt) ? [CLOUD_ATTACHMENTS_NOTE] : []),
+        sendFooter(rt),
       ].join(' '),
-      inputSchema: z.strictObject({
+      inputSchema: forRuntime(rt, z.strictObject({
         mailbox: mailboxField('Mailbox of the message to reply to'),
         uid: uidField(),
         body: bodyField('Plain-text reply. The original message is quoted below it automatically.'),
@@ -125,7 +134,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
         html: htmlField().optional(),
         attachments: attachmentsField().optional(),
         from: fromField().optional(),
-      }),
+      })),
       annotations: annotations(replyTitle, SEND_HINTS),
       _meta: { ...REQUIRES_USER_INTERACTION_META },
     },
@@ -173,7 +182,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
         sendWarning('FORWARD', 'forward the message', 'save_draft with forward_of'),
         'Forwards the email identified by mailbox + uid to new recipients. body is an optional note placed above the forwarded message (which includes its From, Date, Subject, To and Cc); an HTML original is forwarded as HTML too.',
         'The original\'s attachments are included by default (include_attachments=false leaves them out; at most 14 MB). The subject gets "Fwd:" and the original is marked as forwarded and read.',
-        SEND_FOOTER,
+        sendFooter(rt),
       ].join(' '),
       inputSchema: z.strictObject({
         mailbox: mailboxField('Mailbox of the message to forward'),
@@ -230,7 +239,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
         "SENDS A REAL EMAIL IMMEDIATELY from the user's iCloud account; it cannot be recalled. Only call this when the user has explicitly asked to send this draft, and make sure it is the right draft (recipients, subject, content). If unsure, leave it in Drafts: the user can send it from Apple Mail.",
         'Sends a draft from the Drafts folder exactly as it is saved there, including any edits the user made in Apple Mail, with its recipients, subject, attachments and threading headers. Use it after save_draft when the user says the draft can go out, instead of recomposing the message.',
         'Take uid from save_draft\'s result or from search_messages on the Drafts mailbox. Bcc recipients are sent but hidden; the draft is then removed from Drafts (deleted once the Sent copy is saved, otherwise moved to Trash).',
-        SEND_FOOTER,
+        sendFooter(rt),
       ].join(' '),
       inputSchema: z.strictObject({
         uid: uidField().describe('UID of the draft in the Drafts mailbox (from save_draft or search_messages with mailbox "drafts").'),

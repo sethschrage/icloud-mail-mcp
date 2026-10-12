@@ -6,7 +6,10 @@ import * as z from 'zod/v4';
 import { renderJson } from '../render.js';
 import {
   WRITE_NON_IDEMPOTENT_HINTS,
+  CLOUD_ATTACHMENTS_NOTE,
   addressListField,
+  forRuntime,
+  isCloud,
   annotations,
   attachmentsField,
   auditRecipients,
@@ -34,10 +37,12 @@ export function registerDraftTools(server: McpServer, rt: ToolRuntime): void {
         'For a reply draft pass reply_to {mailbox, uid, reply_all}: recipients, "Re:" subject, quoted original and threading headers are filled in (to/cc add extra recipients).',
         'For a forward draft pass forward_of {mailbox, uid, include_attachments}: "Fwd:" subject, the forwarded message and by default its attachments are included; give the recipients in to.',
         'To revise a draft saved earlier, pass its uid in Drafts as replace_draft_uid: from, to, cc, bcc, subject, threading headers and attachments you leave out are kept from the old draft (pass a field, even an empty list, to change it; keep_attachments=false drops the old attachments); body replaces the old body entirely. The new version is saved first; the old one is then deleted if Claude saved it in this session, otherwise moved to Trash (recoverable).',
-        'body is plain text; html is optional. Attachments are local files inside the allowed attachment folders (see the attachments parameter); note that Claude can read files it attaches, even when sending is switched off.',
+        isCloud(rt)
+          ? `body is plain text; html is optional. ${CLOUD_ATTACHMENTS_NOTE.replace('forward an existing email with its attachments (forward_message)', 'save a forward draft with forward_of')}`
+          : 'body is plain text; html is optional. Attachments are local files inside the allowed attachment folders (see the attachments parameter); note that Claude can read files it attaches, even when sending is switched off.',
         'Returns the draft\'s mailbox, uid, Message-ID and what was saved (from, to, cc, bcc, subject, attachment names), so it can be shown to the user. To send a saved draft later, use send_draft (when sending is enabled).',
       ].join(' '),
-      inputSchema: z.strictObject({
+      inputSchema: forRuntime(rt, z.strictObject({
         to: addressListField('To recipients (optional for a draft)').optional(),
         cc: addressListField('Cc recipients').optional(),
         bcc: addressListField('Bcc recipients (kept in the draft; not visible to other recipients once sent)').optional(),
@@ -73,7 +78,7 @@ export function registerDraftTools(server: McpServer, rt: ToolRuntime): void {
           .boolean()
           .describe("With replace_draft_uid and no attachments given: keep the old draft's attachments (default true).")
           .optional(),
-      }),
+      })),
       annotations: annotations(title, WRITE_NON_IDEMPOTENT_HINTS),
     },
     (args, ctx) =>

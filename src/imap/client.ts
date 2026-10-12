@@ -23,7 +23,8 @@ import tls from 'node:tls';
 import { ImapFlow, type ImapFlowOptions, type MailboxObject } from 'imapflow';
 import type { Config } from '../config.js';
 import { currentContext } from '../context.js';
-import { APP_PASSWORD_HELP, type CredentialProvider } from '../credentials.js';
+import { passwordHelp, type CredentialProvider } from '../credentials.js';
+import { getRuntime } from '../runtime.js';
 import { MailError, errorMessage } from '../errors.js';
 import { imapflowLogger, log as defaultLogger, redact, type Logger } from '../log.js';
 import { domainOf, localPartOf } from '../smtp/address.js';
@@ -46,12 +47,14 @@ export function imapLoginCandidates(email: string, override: string | undefined)
 
 export function authFailureMessage(service: 'IMAP' | 'SMTP', host: string, users: readonly string[], serverSaid?: string): string {
   const who = users.length ? users.map((u) => `"${u}"`).join(' and ') : 'the configured account';
-  const customDomain =
-    'custom-domain users: enter your primary @icloud.com address as "iCloud email address" in the extension settings and your custom address as "From address (optional)" (manual setups: ICLOUD_EMAIL / MAIL_FROM_ADDRESS)';
+  const cloud = getRuntime() === 'cloud';
+  const customDomain = cloud
+    ? 'custom-domain users: log in with your primary @icloud.com address (X-ICloud-Email header or ICLOUD_EMAIL) and set your custom address as MAIL_FROM_ADDRESS'
+    : 'custom-domain users: enter your primary @icloud.com address as "iCloud email address" in the extension settings and your custom address as "From address (optional)" (manual setups: ICLOUD_EMAIL / MAIL_FROM_ADDRESS)';
   const loginHint =
     service === 'IMAP'
-      ? `(3) the login must be your iCloud Mail address (or the part before "@"), not an Apple Account sign-in email from another provider such as Gmail; ${customDomain}; a different IMAP login can also be set as "IMAP login (optional)" (ICLOUD_IMAP_USER);`
-      : `(3) SMTP needs your full iCloud Mail address as the login; ${customDomain}; a manual setup can also set ICLOUD_SMTP_USER;`;
+      ? `(3) the login must be your iCloud Mail address (or the part before "@"), not an Apple Account sign-in email from another provider such as Gmail; ${customDomain}; a different IMAP login can also be set as ${cloud ? 'ICLOUD_IMAP_USER' : '"IMAP login (optional)" (ICLOUD_IMAP_USER)'};`
+      : `(3) SMTP needs your full iCloud Mail address as the login; ${customDomain}; ${cloud ? 'ICLOUD_SMTP_USER can also be set' : 'a manual setup can also set ICLOUD_SMTP_USER'};`;
   const nonIcloud = users.find((u) => u.includes('@') && !(ICLOUD_DOMAINS as readonly string[]).includes(domainOf(u)));
   const appleIdHint = nonIcloud
     ? ` Note: "${nonIcloud}" is not an @icloud.com, @me.com or @mac.com address. Your Apple Account email is not necessarily your iCloud Mail address: use your @icloud.com address.`
@@ -63,7 +66,7 @@ export function authFailureMessage(service: 'IMAP' | 'SMTP', host: string, users
     `${loginHint} ` +
     '(4) app-specific passwords require two-factor authentication on the Apple Account.' +
     `${appleIdHint} ` +
-    APP_PASSWORD_HELP
+    passwordHelp()
   );
 }
 

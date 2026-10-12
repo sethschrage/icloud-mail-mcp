@@ -2,6 +2,7 @@
  * Text rendering of tool results (SPEC §5 "Output format"): compact JSON for lists/actions, and a
  * readable layout for get_message (header block, attachments, wrapped body).
  */
+import { getRuntime } from './runtime.js';
 import { decodedSizeEstimate, formatDateISO, formatSize, toJson, truncateResult, MAX_RESULT_CHARS } from './format.js';
 import { renderAddress, type FullMessage } from './imap/fetch.js';
 import { UNTRUSTED_LIST_NOTE, UNTRUSTED_MESSAGE_NOTE, sanitizeInline, wrapUntrusted } from './safety/untrusted.js';
@@ -148,7 +149,7 @@ export function renderMessageView(view: MessageView): string {
   if (view.bodyTruncated) {
     const how =
       view.maxChars >= view.configuredMax
-        ? `This is the configured maximum; to read more, the user can raise "Maximum email length shown to Claude" in the extension settings (MAIL_MAX_BODY_CHARS, now ${view.configuredMax}).`
+        ? `This is the configured maximum; to read more, the user can raise ${getRuntime() === 'cloud' ? 'MAIL_MAX_BODY_CHARS in the Vercel project\'s environment variables' : '"Maximum email length shown to Claude" in the extension settings (MAIL_MAX_BODY_CHARS'}, now ${view.configuredMax}${getRuntime() === 'cloud' ? '' : ')'}.`
         : `Call get_message with a larger max_chars (up to ${view.configuredMax}) to read more.`;
     lines.push(`[Body truncated: showing ${shown} of ${view.bodyTotalChars} characters. ${how}]`);
   }

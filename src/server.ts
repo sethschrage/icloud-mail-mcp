@@ -23,10 +23,17 @@ export function buildInstructions(service: MailService): string {
   if (service.configErrors.length > 0) {
     notes.push('The server is not fully configured yet: every mail tool will explain what to fix, and get_account_info shows the details.');
   }
+  const cloud = service.config.runtime === 'cloud';
+  if (cloud) {
+    notes.push(
+      'This is the cloud-hosted version: it has no access to the user\'s computer. Attachments you open are returned inline (images and text) and are never saved; files from disk cannot be attached, so to share a file use a link from another connector (for example Google Drive) in the body, or forward an existing email with its attachments.',
+    );
+  }
   if (f.readOnly) {
-    notes.push('"Read-only mode" is on in the extension settings (MAIL_READ_ONLY): only reading, searching and downloading attachments are available; nothing in the mailbox can be changed.');
+    notes.push(cloud ? 'Read-only mode is on (MAIL_READ_ONLY): only reading, searching and opening attachments are available; nothing in the mailbox can be changed.' : '"Read-only mode" is on in the extension settings (MAIL_READ_ONLY): only reading, searching and downloading attachments are available; nothing in the mailbox can be changed.');
   } else {
-    if (!f.send) notes.push('Sending is disabled ("Allow sending" is off in the extension settings; MAIL_ALLOW_SEND=false): use save_draft, and the user can send the draft from Apple Mail.');
+    if (!f.send && cloud) notes.push('Sending is disabled (MAIL_ALLOW_SEND=false): use save_draft, and the user can send the draft from Apple Mail or iCloud.com.');
+    else if (!f.send) notes.push('Sending is disabled ("Allow sending" is off in the extension settings; MAIL_ALLOW_SEND=false): use save_draft, and the user can send the draft from Apple Mail.');
     if (!f.permanentDelete) notes.push('Permanent deletion is disabled; trash_messages is the way to delete mail.');
   }
   return notes.length ? `${BASE_INSTRUCTIONS}\n\n${notes.join(' ')}` : BASE_INSTRUCTIONS;

@@ -7,11 +7,11 @@
 import type { ImapFlow, ImapFlowOptions } from 'imapflow';
 import { AuditLog, markAudited } from './audit.js';
 import { effectiveFeatures, loadConfig, settingName, type Config, type ConfigResult, type LoadConfigOptions } from './config.js';
-import { APP_PASSWORD_HELP, CredentialProvider, defaultExecFile, type CredentialOptions, type ExecFileFn } from './credentials.js';
+import { passwordHelp, CredentialProvider, defaultExecFile, type CredentialOptions, type ExecFileFn } from './credentials.js';
 import { MailError, errorMessage } from './errors.js';
 import { formatDateISO, formatSize, toJson } from './format.js';
 import { ImapManager } from './imap/client.js';
-import { downloadPartToDir, extractMessageIds, fetchAttachmentBuffers, fetchFullMessage, readEmbeddedMessage, resolveAttachmentPart, type FullMessage } from './imap/fetch.js';
+import { downloadPartToDir, downloadPartToMemory, extractMessageIds, fetchAttachmentBuffers, fetchFullMessage, readEmbeddedMessage, resolveAttachmentPart, type FullMessage } from './imap/fetch.js';
 import { ANSWERED, DELETED, DRAFT, FORWARDED, SEEN, hasFlag, isFlagColor, type FlagColor } from './imap/flags.js';
 import { MailboxRegistry, type MailboxInfo, type SpecialUse } from './imap/mailboxes.js';
 import { decodeCharset } from './imap/mime.js';
@@ -37,6 +37,8 @@ import {
 import { searchMessages, type SearchCriteria, type SearchResult } from './imap/search.js';
 import { getThread, type ThreadResult } from './imap/thread.js';
 import { log as defaultLogger, redact, type Logger } from './log.js';
+import { createSharedQuota, type FetchFn, type SharedQuota } from './quota.js';
+import { settingsPlace } from './runtime.js';
 import { buildMessageView, type MessageView } from './render.js';
 import { CONFIRM_DISABLE_HINT, buildDeleteConfirmationMessage, createConfirmer, type ConfirmFn } from './safety/confirm.js';
 import { isRiskyFileName, markQuarantined, type PathContext } from './safety/paths.js';
@@ -82,6 +84,8 @@ export interface MailServiceDeps {
   idleCloseMs?: number;
   /** Runs /usr/bin/xattr (quarantine flag for downloads on macOS); injectable for tests. */
   exec?: ExecFileFn;
+  /** fetch used for the shared send-limit store (cloud; injectable for tests). */
+  quotaFetch?: FetchFn;
 }
 
 export interface OperationOptions {
@@ -193,7 +197,8 @@ export interface AttachmentResult {
   mailbox: string;
   uid: number;
   part: string;
-  path: string;
+  /** Where the file was saved (absent in the cloud version, which has no disk). */
+  path?: string;
   filename: string;
   size: number;
   size_human: string;
@@ -236,6 +241,8 @@ export class MailService {
   readonly audit: AuditLog;
   readonly rateLimiter: RateLimiter;
   readonly recipientLimiter: RecipientLimiter;
+  /** Limits shared by every instance of the cloud version (no-op locally). */
+  readonly sharedQuota: SharedQuota;
   readonly sender: Sender;
   private readonly confirm: ConfirmFn;
   private readonly pathContext: PathContext | undefined;
@@ -271,6 +278,11 @@ export class MailService {
     this.audit = new AuditLog(this.config.auditLog, this.logger);
     this.rateLimiter = new RateLimiter(this.config.maxSendsPerHour, deps.now);
     this.recipientLimiter = new RecipientLimiter(this.config.maxRecipientsPerHour, this.config.maxRecipientsPerDay, deps.now);
+    this.sharedQuota = createSharedQuota(this.config, {
+      logger: this.logger,
+      ...(deps.quotaFetch ? { fetch: deps.quotaFetch } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
     this.platform = deps.platform ?? process.platform;
     this.exec = deps.exec ?? defaultExecFile;
     const confirm = deps.confirm ?? createConfirmer(deps.platform ? { platform: deps.platform } : {});
@@ -282,6 +294,7 @@ export class MailService {
       audit: this.audit,
       rateLimiter: this.rateLimiter,
       recipientLimiter: this.recipientLimiter,
+      sharedQuota: this.sharedQuota,
       confirm,
       tlsOptions: () => this.imap.tlsOptions(),
       logger: this.logger,
@@ -300,7 +313,7 @@ export class MailService {
     const needsPasswordHelp = this.configErrors.some((e) => /ICLOUD_EMAIL|PASSWORD/i.test(e));
     throw new MailError(
       'CONFIG',
-      `The iCloud Mail server is not configured correctly:\n- ${this.configErrors.join('\n- ')}${needsPasswordHelp ? `\n${APP_PASSWORD_HELP}` : ''}`,
+      `The iCloud Mail server is not configured correctly:\n- ${this.configErrors.join('\n- ')}${needsPasswordHelp && this.config.runtime !== 'cloud' ? `\n${passwordHelp()}` : ''}`,
     );
   }
 
@@ -372,7 +385,7 @@ export class MailService {
     const requested = params.maxChars === undefined ? cap : Math.max(1, Math.floor(params.maxChars));
     const maxChars = Math.min(cap, requested);
     const notes: string[] = [];
-    if (requested > cap) notes.push(`max_chars was limited to the configured maximum of ${cap} characters (${settingName('MAIL_MAX_BODY_CHARS')} in the extension settings).`);
+    if (requested > cap) notes.push(`max_chars was limited to the configured maximum of ${cap} characters (${settingName('MAIL_MAX_BODY_CHARS')} in ${settingsPlace()}).`);
     let markAsRead = params.markAsRead ?? false;
     if (markAsRead && this.config.readOnly) {
       markAsRead = false;
@@ -437,11 +450,14 @@ export class MailService {
         max_recipients: c.maxRecipients,
       },
       limits: { max_body_chars: c.maxBodyChars, max_attachment_mb: c.maxAttachmentMb, operation_timeout_seconds: c.operationTimeoutSeconds },
-      attachment_dir: c.attachmentDir,
-      attach_from_dirs: c.attachFromDirs,
+      runtime: c.runtime,
+      ...(c.runtime === 'cloud'
+        ? { attachments: 'Downloaded attachments are returned inline (images and text); the cloud version has no disk, so files cannot be saved or attached from disk.' }
+        : { attachment_dir: c.attachmentDir, attach_from_dirs: c.attachFromDirs }),
       audit_log: c.auditLog ?? 'off',
       now: { local: formatDateISO(new Date(), c.timezone), timezone: c.timezone },
     };
+    if (c.runtime === 'cloud' && f.send) info['shared_send_limits'] = await this.sharedQuota.status();
     if (this.configErrors.length) info['config_errors'] = [...this.configErrors];
     if (this.configWarnings.length) info['config_warnings'] = [...this.configWarnings];
     if (this.configErrors.length) {
@@ -488,6 +504,7 @@ export class MailService {
     const uid = this.uid(params.uid);
     const returnContent = params.returnContent ?? true;
     const maxBytes = this.config.maxAttachmentMb * 1024 * 1024;
+    if (this.config.runtime === 'cloud') return this.downloadAttachmentInline(mb.path, uid, params.part, returnContent, maxBytes);
     const file = await this.imap.withMailbox(
       mb.path,
       async (client) => {
@@ -533,6 +550,52 @@ export class MailService {
       }
     }
     await this.audit.record({ tool: 'download_attachment', result: 'ok', mailbox: mb.path, uids: [uid], part: params.part, path: file.path });
+    return result;
+  }
+
+  /** Cloud version: nothing is saved; small images and text come back inline, other files are described. */
+  private async downloadAttachmentInline(mailbox: string, uid: number, part: string, returnContent: boolean, maxBytes: number): Promise<AttachmentResult> {
+    const file = await this.imap.withMailbox(
+      mailbox,
+      async (client) => {
+        const got = await downloadPartToMemory(client, mailbox, uid, part, {
+          maxBytes,
+          captureFor: (type) => (!returnContent ? 0 : INLINE_IMAGE_TYPES.has(type) ? IMAGE_INLINE_MAX_BYTES : isInlineTextType(type) ? TEXT_INLINE_MAX_BYTES : 0),
+        });
+        let embedded: string | undefined;
+        if (returnContent && EMBEDDED_MESSAGE_TYPES.has(got.content_type)) {
+          const { node } = await resolveAttachmentPart(client, mailbox, uid, part);
+          embedded = await readEmbeddedMessage(client, uid, part, node, this.config.timezone);
+        }
+        return { ...got, embedded };
+      },
+      { readOnly: true, retry: false },
+    );
+    const result: AttachmentResult = {
+      mailbox,
+      uid,
+      part,
+      filename: file.filename,
+      size: file.size,
+      size_human: formatSize(file.size),
+      content_type: file.content_type,
+    };
+    if (isRiskyFileName(file.filename)) {
+      result.warning = 'This file type can run code or install software when opened (or contain something that does). Tell the user to open it only if they trust the sender.';
+    }
+    const elsewhere = 'The cloud version cannot save files; the user can open it in Apple Mail or at icloud.com/mail, or another connector can be used to store or share it.';
+    if (!returnContent) {
+      result.note = `Not shown (return_content is false). ${elsewhere}`;
+    } else if (file.embedded !== undefined) {
+      result.content = { kind: 'text', text: file.embedded };
+    } else if (file.content && INLINE_IMAGE_TYPES.has(file.content_type) && file.size <= IMAGE_INLINE_MAX_BYTES) {
+      result.content = { kind: 'image', mimeType: file.content_type, data: file.content.toString('base64') };
+    } else if (file.content && isInlineTextType(file.content_type) && file.size <= TEXT_INLINE_MAX_BYTES) {
+      result.content = { kind: 'text', text: decodeCharset(file.content, file.charset ?? 'utf-8') };
+    } else {
+      result.note = `The content is not shown here (${file.content_type}, ${formatSize(file.size)}): only images up to ${formatSize(IMAGE_INLINE_MAX_BYTES)} and text files up to ${formatSize(TEXT_INLINE_MAX_BYTES)} can be returned. ${elsewhere}`;
+    }
+    await this.audit.record({ tool: 'download_attachment', result: 'ok', mailbox, uids: [uid], part });
     return result;
   }
 

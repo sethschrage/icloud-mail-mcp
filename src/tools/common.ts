@@ -26,6 +26,24 @@ export interface ToolRuntime {
   logger: Logger;
 }
 
+/** True for the Vercel-hosted version (no local disk, no Mac confirmation dialog). */
+export function isCloud(rt: ToolRuntime): boolean {
+  return rt.service.config.runtime === 'cloud';
+}
+
+/** How files get into outgoing mail in the cloud version, for tool descriptions. */
+export const CLOUD_ATTACHMENTS_NOTE =
+  'Files from disk cannot be attached in the cloud version: to share a file, put a link from another connector (for example a shared Google Drive or Dropbox link) in the body, or forward an existing email with its attachments (forward_message).';
+
+/**
+ * Cloud version: drop the local-file `attachments` parameter (there is no disk to attach from),
+ * so Claude is never offered it. The field is optional, so handlers see it as undefined.
+ */
+export function forRuntime<T extends z.ZodObject>(rt: ToolRuntime, schema: T): T {
+  if (!isCloud(rt) || !('attachments' in schema.shape)) return schema;
+  return schema.omit({ attachments: true } as never) as unknown as T;
+}
+
 /** Tool annotations with every hint set explicitly (SPEC §6). */
 export interface ToolHints {
   readOnlyHint: boolean;

@@ -2,6 +2,8 @@
  * Sending (SPEC §6.6): per-send SMTP transport, raw send with the same Message-ID, rejected-recipient
  * handling, Sent copy with a dedupe check, rolling rate limit, optional native confirmation, audit.
  */
+import { settingsPlace } from '../runtime.js';
+import type { QuotaReservation, SharedQuota } from '../quota.js';
 import type tls from 'node:tls';
 import nodemailer from 'nodemailer';
 import type { NodemailerError, SMTPSentMessageInfo } from 'nodemailer';
@@ -75,7 +77,7 @@ export class RateLimiter {
       const mins = Math.ceil(this.retryAfterSeconds() / 60);
       throw new MailError(
         'RATE_LIMIT',
-        `Send limit reached: at most ${this.maxPerHour} emails per hour (${settingName('MAIL_MAX_SENDS_PER_HOUR')} in the extension settings). Try again in about ${mins} minute${mins === 1 ? '' : 's'}, or save a draft instead.`,
+        `Send limit reached: at most ${this.maxPerHour} emails per hour (${settingName('MAIL_MAX_SENDS_PER_HOUR')} in ${settingsPlace()}). Try again in about ${mins} minute${mins === 1 ? '' : 's'}, or save a draft instead.`,
       );
     }
   }
@@ -314,6 +316,8 @@ export interface SenderDeps {
   audit: AuditLog;
   rateLimiter: RateLimiter;
   recipientLimiter?: RecipientLimiter;
+  /** Limits shared across instances (cloud version; see quota.ts). */
+  sharedQuota?: SharedQuota;
   confirm: ConfirmFn;
   tlsOptions: () => tls.ConnectionOptions;
   logger?: Logger;
@@ -445,8 +449,10 @@ export class Sender {
     const reservation = options.reservation ?? this.deps.rateLimiter.reserve();
     let committed = false;
     let recipients: RateReservation | undefined;
+    let shared: QuotaReservation | undefined;
     try {
       recipients = this.deps.recipientLimiter?.reserve(built.envelope.to.length);
+      shared = await this.deps.sharedQuota?.reserve(built.envelope.to.length);
       if (config.confirmDialog) {
         const decision = await this.deps.confirm(
           {
@@ -543,6 +549,7 @@ export class Sender {
       if (!committed) {
         reservation.release();
         recipients?.release();
+        await shared?.release();
       }
     }
   }
