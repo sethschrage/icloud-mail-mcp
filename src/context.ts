@@ -5,10 +5,10 @@
  * deadline/cancellation AbortSignal and the absolute deadline. Code deep in the IMAP layer reads it
  * without threading a parameter through every function:
  *
- * - ImapManager tears down the shared connection when the signal fires while an IMAP command of
- *   that call is still pending (otherwise the stuck command would keep the mailbox lock and the one
- *   socket, and every later call would fail for minutes), and refuses to start new commands for an
- *   abandoned call;
+ * - ImapManager stops waiting when the signal fires while an IMAP command of that call is still
+ *   pending, and tears down the shared connection unless other calls are still using it (otherwise
+ *   the stuck command would keep the mailbox lock and the one socket, and every later call would
+ *   fail for minutes); it refuses to start new commands for an abandoned call;
  * - the Sender finishes post-send work (Sent copy, flagging the original) before the deadline, so
  *   a delivered email is never reported as a timeout.
  *

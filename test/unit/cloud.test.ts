@@ -5,7 +5,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../../src/config.js';
 import { MailError } from '../../src/errors.js';
-import { checkAccess, createCloudHandler, loginCacheKey, loginFromRequest, MAX_CACHED_LOGINS, MIN_ACCESS_KEY_LENGTH, type CloudHandler } from '../../src/http/handler.js';
+import { checkAccess, createCloudHandler, INCOMPLETE_HEADERS, loginCacheKey, loginFromRequest, MAX_CACHED_LOGINS, MIN_ACCESS_KEY_LENGTH, type CloudHandler } from '../../src/http/handler.js';
 import { accountKey, createSharedQuota, MissingSharedQuota, UpstashQuota } from '../../src/quota.js';
 import { setRuntime } from '../../src/runtime.js';
 import { AuditLog } from '../../src/audit.js';
@@ -37,10 +37,11 @@ describe('checkAccess', () => {
 describe('loginFromRequest', () => {
   it('takes both headers or nothing, and reports a partial set', () => {
     const full = loginFromRequest(req(ENDPOINT, { headers: { 'X-ICloud-Email': ' a@icloud.com ', 'X-ICloud-Password': 'abcd-efgh-ijkl-mnop', 'X-ICloud-From': 'me@example.com' } }));
-    expect(full).toEqual({ login: { email: 'a@icloud.com', password: 'abcd-efgh-ijkl-mnop', from: 'me@example.com' }, partial: false });
-    expect(loginFromRequest(req(ENDPOINT))).toEqual({ login: null, partial: false });
-    expect(loginFromRequest(req(ENDPOINT, { headers: { 'X-ICloud-Email': 'a@icloud.com' } }))).toEqual({ login: null, partial: true });
-    expect(loginFromRequest(req(ENDPOINT, { headers: { 'X-ICloud-Password': 'pw' } }))).toEqual({ login: null, partial: true });
+    expect(full).toEqual({ login: { email: 'a@icloud.com', password: 'abcd-efgh-ijkl-mnop', from: 'me@example.com' }, partial: false, problem: null });
+    expect(loginFromRequest(req(ENDPOINT))).toEqual({ login: null, partial: false, problem: null });
+    expect(loginFromRequest(req(ENDPOINT, { headers: { 'X-ICloud-Email': 'a@icloud.com' } }))).toEqual({ login: null, partial: true, problem: INCOMPLETE_HEADERS });
+    expect(loginFromRequest(req(ENDPOINT, { headers: { 'X-ICloud-Password': 'pw' } }))).toEqual({ login: null, partial: true, problem: INCOMPLETE_HEADERS });
+    expect(loginFromRequest(req(ENDPOINT, { headers: { 'X-ICloud-From': 'me@example.com' } }))).toEqual({ login: null, partial: true, problem: INCOMPLETE_HEADERS });
   });
 
   it('keys the login cache by a hash, never the raw values', () => {
@@ -107,11 +108,29 @@ describe('cloud configuration', () => {
 });
 
 describe('UpstashQuota', () => {
-  const HOUR = 3_600_000;
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  const quietLogger = () => ({ level: 'warn' as const, setLevel: vi.fn(), enabled: () => true, error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() });
   const make = (fake: FakeUpstash, opts: Partial<ConstructorParameters<typeof UpstashQuota>[0]> = {}, now = () => 10 * HOUR) =>
-    new UpstashQuota({ url: 'https://upstash.test', token: 'tok', email: 'Seth@iCloud.com', maxSendsPerHour: 3, maxRecipientsPerHour: 10, maxRecipientsPerDay: 20, fetch: fake.fetch, now, ...opts });
+    new UpstashQuota({
+      url: 'https://upstash.test',
+      token: 'tok',
+      email: 'Seth@iCloud.com',
+      maxSendsPerHour: 3,
+      maxRecipientsPerHour: 10,
+      maxRecipientsPerDay: 20,
+      fetch: fake.fetch,
+      now,
+      logger: quietLogger(),
+      ...opts,
+    });
+  const members = (fake: FakeUpstash) => [...fake.data.values()].reduce((n, set) => n + set.size, 0);
+  /** Largest total of `amounts` accepted within any span [t, t + windowMs). */
+  const maxInWindow = (times: number[], amounts: number[], windowMs: number) =>
+    Math.max(0, ...times.map((t) => times.reduce((sum, u, j) => (u >= t && u < t + windowMs ? sum + (amounts[j] ?? 0) : sum), 0)));
 
-  it('counts sends and recipients, refuses beyond a limit and rolls the refused attempt back', async () => {
+  it('counts sends and recipients, refuses beyond a limit and leaves nothing of the refused attempt behind', async () => {
     const fake = new FakeUpstash();
     const q = make(fake);
     for (let i = 0; i < 3; i++) await q.reserve(2);
@@ -119,6 +138,8 @@ describe('UpstashQuota', () => {
     await expect(q.reserve(1)).rejects.toMatchObject({ code: 'RATE_LIMIT', message: expect.stringMatching(/at most 3 emails per hour/) });
     expect(fake.total('sends_h')).toBe(3);
     expect(fake.total('rcpt_h')).toBe(6);
+    expect(fake.total('rcpt_d')).toBe(6);
+    expect([...fake.data.values()].map((set) => set.size)).toEqual([3, 3, 3]);
   });
 
   it('refuses a send whose recipients exceed the hourly budget, without counting it', async () => {
@@ -126,8 +147,10 @@ describe('UpstashQuota', () => {
     const q = make(fake);
     await q.reserve(8);
     await expect(q.reserve(3)).rejects.toMatchObject({ code: 'RATE_LIMIT', message: expect.stringMatching(/only 2 more are allowed/) });
+    expect(fake.total('sends_h')).toBe(1);
     expect(fake.total('rcpt_h')).toBe(8);
     expect(fake.total('rcpt_d')).toBe(8);
+    expect(members(fake)).toBe(3);
   });
 
   it('releases a reservation once when the send does not happen', async () => {
@@ -138,27 +161,90 @@ describe('UpstashQuota', () => {
     await r.release();
     expect(fake.total('sends_h')).toBe(0);
     expect(fake.total('rcpt_h')).toBe(0);
+    expect(fake.data.size).toBe(0);
+    expect(fake.requests).toHaveLength(2);
+    expect(fake.requests[1]?.commands.map((c) => c[0])).toEqual(['ZREM', 'ZREM', 'ZREM']);
   });
 
-  it('uses a sliding window: the previous hour still counts in proportion', async () => {
+  it('retries a release that failed, on the next call', async () => {
     const fake = new FakeUpstash();
-    let now = 10 * HOUR + 0.9 * HOUR;
-    const q = make(fake, {}, () => now);
-    for (let i = 0; i < 3; i++) await q.reserve(1);
-    now = 11 * HOUR + 0.1 * HOUR; // 90% of the previous hour still overlaps: 2.7 sends
-    await expect(q.reserve(1)).rejects.toMatchObject({ code: 'RATE_LIMIT' });
-    now = 11 * HOUR + 0.8 * HOUR; // 20% overlaps: 0.6 sends
-    await expect(q.reserve(1)).resolves.toBeDefined();
+    const logger = quietLogger();
+    const q = make(fake, { logger });
+    const r = await q.reserve(4);
+    fake.fail = 'network';
+    await expect(r.release()).resolves.toBeUndefined();
+    expect(logger.warn).toHaveBeenCalledWith('could not release a send-limit reservation', expect.anything());
+    expect(fake.total('rcpt_d')).toBe(4);
+    fake.fail = null;
+    await r.release();
+    expect(fake.total('sends_h')).toBe(0);
+    expect(fake.total('rcpt_d')).toBe(0);
+    const sent = fake.requests.length;
+    await r.release();
+    expect(fake.requests).toHaveLength(sent);
   });
 
-  it('sends the token only as a Bearer header and keys counters by a hash of the address', async () => {
+  it('keeps an exact rolling hour: a burst just before the top of the hour cannot double the limit', async () => {
+    const fake = new FakeUpstash();
+    let now = 10 * HOUR + 59 * MIN;
+    const q = make(fake, { maxSendsPerHour: 30, maxRecipientsPerHour: 0, maxRecipientsPerDay: 0 }, () => now);
+    const accepted: number[] = [];
+    const attempt = async () => {
+      try {
+        await q.reserve(1);
+        accepted.push(now);
+      } catch (err) {
+        expect(err).toMatchObject({ code: 'RATE_LIMIT' });
+      }
+      expect(fake.total('sends_h')).toBeLessThanOrEqual(30);
+    };
+    for (let i = 0; i < 30; i++) await attempt();
+    expect(accepted).toHaveLength(30);
+    for (now += 10_000; now <= 12 * HOUR; now += 10_000) await attempt();
+    expect(maxInWindow(accepted, accepted.map(() => 1), HOUR)).toBe(30);
+    // Nothing more until the 10:59 sends are an hour old, then sending resumes.
+    expect(accepted.slice(30)).toEqual([0, 1, 2, 3, 4, 5, 6].map((i) => 11 * HOUR + 59 * MIN + i * 10_000));
+  });
+
+  it('keeps an exact rolling day for recipients (10 recipients a minute for 30 hours, default limits)', async () => {
+    const fake = new FakeUpstash();
+    const start = 7 * HOUR + 13 * MIN;
+    let now = start;
+    const q = make(fake, { maxSendsPerHour: 30, maxRecipientsPerHour: 150, maxRecipientsPerDay: 500 }, () => now);
+    const accepted: number[] = [];
+    for (; now < start + 30 * HOUR; now += MIN) {
+      try {
+        await q.reserve(10);
+        accepted.push(now);
+      } catch (err) {
+        expect(err).toMatchObject({ code: 'RATE_LIMIT' });
+      }
+    }
+    const rcpt = accepted.map(() => 10);
+    expect(maxInWindow(accepted, rcpt, DAY)).toBe(500);
+    expect(maxInWindow(accepted, rcpt, HOUR)).toBe(150);
+    expect(maxInWindow(accepted, accepted.map(() => 1), HOUR)).toBeLessThanOrEqual(30);
+    expect(accepted.filter((t) => t < start + DAY)).toHaveLength(50);
+    expect(accepted.filter((t) => t >= start + DAY).length).toBeGreaterThan(0);
+  });
+
+  it('sends the token only as a Bearer header and keys one sorted set per limit by a hash of the address', async () => {
     const fake = new FakeUpstash();
     await make(fake).reserve(1);
     expect(fake.requests[0]?.url).toBe('https://upstash.test/pipeline');
     expect(fake.requests[0]?.authorization).toBe('Bearer tok');
     const keys = [...fake.data.keys()];
-    expect(keys.every((k) => k.includes(accountKey('seth@icloud.com')))).toBe(true);
-    expect(keys.map((k) => k.replace(/^icloud-mail:v1:/, '')).join(' ')).not.toMatch(/seth|icloud/i);
+    const prefix = `icloud-mail:v2:${accountKey('seth@icloud.com')}`;
+    expect(keys).toEqual([`${prefix}:sends_h`, `${prefix}:rcpt_h`, `${prefix}:rcpt_d`]);
+    expect(keys.map((k) => k.replace(/^icloud-mail:v2:/, '')).join(' ')).not.toMatch(/seth|icloud/i);
+    const [first] = fake.requests[0]?.commands ?? [];
+    expect(first).toEqual(['ZREMRANGEBYSCORE', `${prefix}:sends_h`, '-inf', String(9 * HOUR)]);
+    expect(fake.requests[0]?.commands.slice(1, 4)).toEqual([
+      ['ZADD', `${prefix}:sends_h`, String(10 * HOUR), expect.stringMatching(/^[0-9a-f-]{36}:1$/)],
+      ['PEXPIRE', `${prefix}:sends_h`, String(HOUR + MIN)],
+      ['ZRANGE', `${prefix}:sends_h`, '0', '-1'],
+    ]);
+    expect(fake.ttl.get(`${prefix}:rcpt_d`)).toBe(DAY + MIN);
   });
 
   it('fails closed when Upstash is unreachable or refuses the token', async () => {
@@ -167,13 +253,68 @@ describe('UpstashQuota', () => {
     await expect(make(fake).reserve(1)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/Not sent: the send-limit store/) });
     fake.fail = 401;
     await expect(make(fake).reserve(1)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/HTTP 401 \(check the Upstash token\)/) });
+    expect(fake.data.size).toBe(0);
   });
 
-  it('reports what is left', async () => {
+  it('removes its members when the answer is lost after Upstash applied the commands', async () => {
     const fake = new FakeUpstash();
     const q = make(fake);
+    fake.fail = 'timeout-after-apply';
+    fake.failTimes = 1;
+    await expect(q.reserve(2)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/could not be reached \(The operation was aborted due to timeout\)/) });
+    expect(fake.requests).toHaveLength(2);
+    expect(fake.requests[1]?.commands.map((c) => c[0])).toEqual(['ZREM', 'ZREM', 'ZREM']);
+    expect(fake.total('sends_h')).toBe(0);
+    expect(fake.total('rcpt_h')).toBe(0);
+    expect(fake.total('rcpt_d')).toBe(0);
+    expect(fake.data.size).toBe(0);
+    await expect(q.reserve(2)).resolves.toBeDefined();
+    expect(fake.total('sends_h')).toBe(1);
+  });
+
+  it('removes its members after an HTTP error, a wrong-length answer, or an error in one command', async () => {
+    const fake = new FakeUpstash();
+    fake.fail = 503;
+    fake.failTimes = 1;
+    await expect(make(fake).reserve(2)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/HTTP 503/) });
+    expect(fake.requests.at(-1)?.commands.map((c) => c[0])).toEqual(['ZREM', 'ZREM', 'ZREM']);
+    expect(fake.data.size).toBe(0);
+
+    fake.errorAt = 5; // the recipients-per-hour ZADD fails; the other commands are applied
+    await expect(make(fake).reserve(2)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/reported an error \(ERR simulated failure\)/) });
+    expect(fake.total('sends_h') + fake.total('rcpt_h') + fake.total('rcpt_d')).toBe(0);
+    expect(fake.data.size).toBe(0);
+
+    let calls = 0;
+    const truncating: typeof fake.fetch = async (url, init) => {
+      const res = await fake.fetch(url, init);
+      const body = (await res.json()) as unknown[];
+      return { ...res, json: async () => (calls++ === 0 ? body.slice(1) : body) };
+    };
+    await expect(make(fake, { fetch: truncating }).reserve(2)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/unexpected answer/) });
+    expect(fake.data.size).toBe(0);
+  });
+
+  it('logs, and still reports the original error, when the clean-up fails too', async () => {
+    const fake = new FakeUpstash();
+    const logger = quietLogger();
+    fake.fail = 'network';
+    await expect(make(fake, { logger }).reserve(1)).rejects.toMatchObject({ code: 'CONNECTION', message: expect.stringMatching(/could not be reached \(getaddrinfo ENOTFOUND/) });
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/could not remove a send-limit reservation/), expect.anything());
+  });
+
+  it('reports what is left in the rolling windows', async () => {
+    const fake = new FakeUpstash();
+    let now = 10 * HOUR;
+    const q = make(fake, {}, () => now);
     await q.reserve(4);
     expect(await q.status()).toEqual({ store: 'upstash', sends_remaining_this_hour: 2, recipients_remaining_this_hour: 6, recipients_remaining_today: 16 });
+    now = 11 * HOUR; // the send is now exactly an hour old: out of the hourly window, still in the daily one
+    expect(await q.status()).toEqual({ store: 'upstash', sends_remaining_this_hour: 3, recipients_remaining_this_hour: 10, recipients_remaining_today: 16 });
+    expect(fake.requests.at(-1)?.commands[0]).toEqual(['ZRANGEBYSCORE', expect.stringMatching(/:sends_h$/), `(${10 * HOUR}`, '+inf']);
+    expect(await make(fake, { maxSendsPerHour: 0 }).status()).toMatchObject({ sends_remaining_this_hour: 'unlimited', recipients_remaining_today: 16 });
+    fake.fail = 'network';
+    expect(await q.status()).toEqual({ store: 'upstash', error: expect.stringMatching(/could not be reached/) });
   });
 
   it('refuses sends with a clear fix when no store is configured', async () => {
@@ -262,7 +403,7 @@ describe('cloud HTTP handler (no mail server)', () => {
     const logger = { error: (...a: unknown[]) => logged.push(JSON.stringify(a)), warn: (...a: unknown[]) => logged.push(JSON.stringify(a)), info: () => undefined, debug: () => undefined } as never;
     // Nothing listens on port 9: the login attempt fails fast with a connection error.
     handler = createCloudHandler({ env: cloudEnv({ IMAP_PORT: '9', MAIL_LOG_LEVEL: 'debug' }), logger });
-    const password = 'zzqx-secret-pw-9431';
+    const password = 'zzqx-secr-etpw-qxyz';
     const a = await connectCloud(handler, { headers: { 'X-ICloud-Email': 'someone@icloud.com', 'X-ICloud-Password': password } });
     const search = await a.client.callTool({ name: 'search_messages', arguments: {} });
     expect(search.isError).toBe(true);
@@ -281,7 +422,7 @@ describe('cloud HTTP handler (no mail server)', () => {
   it('closes the least recently used login beyond the cache limit', async () => {
     handler = createCloudHandler({ env: cloudEnv() });
     for (let i = 0; i <= MAX_CACHED_LOGINS; i++) {
-      const c = await connectCloud(handler, { headers: { 'X-ICloud-Email': `u${i}@icloud.com`, 'X-ICloud-Password': `pw-${i}` } });
+      const c = await connectCloud(handler, { headers: { 'X-ICloud-Email': `u${i}@icloud.com`, 'X-ICloud-Password': `abcd-efgh-ijkl-${String.fromCharCode(97 + i)}aaa` } });
       await c.close();
     }
     expect(handler.cachedLogins).toBe(MAX_CACHED_LOGINS);

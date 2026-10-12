@@ -2,7 +2,7 @@
  * Sending (SPEC §6.6): per-send SMTP transport, raw send with the same Message-ID, rejected-recipient
  * handling, Sent copy with a dedupe check, rolling rate limit, optional native confirmation, audit.
  */
-import { settingsPlace } from '../runtime.js';
+import { getRuntime, keepAlive, settingsPlace } from '../runtime.js';
 import type { QuotaReservation, SharedQuota } from '../quota.js';
 import type tls from 'node:tls';
 import nodemailer from 'nodemailer';
@@ -420,13 +420,18 @@ export class Sender {
     } finally {
       if (timer) clearTimeout(timer);
     }
-    void work.then(
+    const finishing = work.then(
       (r) => this.logger.info('post-send work finished after the tool call returned', { sent_copy_saved: r['sent_copy_saved'] }),
       (err: unknown) => this.logger.warn('post-send work failed after the tool call returned', { err: redact(errorMessage(err)) }),
     );
+    // On Vercel an instance may be frozen once the response is sent; waitUntil keeps it running.
+    // Locally the process stays up, so the work simply continues.
+    const continues = keepAlive(finishing) || getRuntime() === 'local';
     return {
       sent_copy_saved: false,
-      sent_copy_note: 'The email was sent. Saving the copy to the Sent mailbox was still in progress when the time limit was reached; it continues in the background (check the Sent mailbox before saving another copy).',
+      sent_copy_note: continues
+        ? 'The email was sent. Saving the copy to the Sent mailbox was still in progress when the time limit was reached; it continues in the background (check the Sent mailbox before saving another copy).'
+        : 'The email was sent. Saving the copy to the Sent mailbox was still in progress when the time limit was reached and may not finish; check the Sent mailbox.',
     };
   }
 

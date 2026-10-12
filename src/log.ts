@@ -22,20 +22,30 @@ const REDACTED = '[REDACTED]';
 
 /** Registry of secret strings that must never appear in logs or tool output. */
 class SecretRegistry {
-  private readonly secrets = new Set<string>();
+  /** Each registered secret with the variants derived from it, so it can be forgotten as a whole. */
+  private readonly secrets = new Map<string, Set<string>>();
 
   add(secret: string | undefined, usernames: readonly string[] = []): void {
     if (!secret) return;
-    this.secrets.add(secret);
+    let variants = this.secrets.get(secret);
+    if (!variants) {
+      variants = new Set();
+      this.secrets.set(secret, variants);
+    }
+    variants.add(secret);
     // Variants that libraries might echo: base64 of the password, and SASL PLAIN / LOGIN blobs.
-    this.secrets.add(Buffer.from(secret, 'utf8').toString('base64'));
+    variants.add(Buffer.from(secret, 'utf8').toString('base64'));
     for (const user of usernames) {
       if (!user) continue;
-      this.secrets.add(Buffer.from(`\u0000${user}\u0000${secret}`, 'utf8').toString('base64'));
-      this.secrets.add(Buffer.from(`${user}\u0000${user}\u0000${secret}`, 'utf8').toString('base64'));
+      variants.add(Buffer.from(`\u0000${user}\u0000${secret}`, 'utf8').toString('base64'));
+      variants.add(Buffer.from(`${user}\u0000${user}\u0000${secret}`, 'utf8').toString('base64'));
     }
     const stripped = secret.replace(/-/g, '');
-    if (stripped.length >= 8 && stripped !== secret) this.secrets.add(stripped);
+    if (stripped.length >= 8 && stripped !== secret) variants.add(stripped);
+  }
+
+  forget(secret: string): void {
+    this.secrets.delete(secret);
   }
 
   clear(): void {
@@ -45,7 +55,9 @@ class SecretRegistry {
   redact(text: string): string {
     let out = text;
     // Longest first so a secret that contains another is fully replaced.
-    const sorted = [...this.secrets].filter((s) => s.length >= 4).sort((a, b) => b.length - a.length);
+    const all = new Set<string>();
+    for (const variants of this.secrets.values()) for (const v of variants) all.add(v);
+    const sorted = [...all].filter((s) => s.length >= 4).sort((a, b) => b.length - a.length);
     for (const secret of sorted) {
       if (out.includes(secret)) out = out.split(secret).join(REDACTED);
     }
@@ -58,6 +70,14 @@ const secrets = new SecretRegistry();
 /** Register a secret (e.g. the app-specific password) so it is redacted everywhere. */
 export function registerSecret(secret: string | undefined, usernames: readonly string[] = []): void {
   secrets.add(secret, usernames);
+}
+
+/**
+ * Forget a secret and every variant registered for it (cloud version: a header login's password
+ * once its cached login is closed). Only for secrets nothing else still uses.
+ */
+export function forgetSecret(secret: string): void {
+  secrets.forget(secret);
 }
 
 /** Test helper: forget all registered secrets. */

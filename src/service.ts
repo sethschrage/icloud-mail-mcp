@@ -38,7 +38,7 @@ import { searchMessages, type SearchCriteria, type SearchResult } from './imap/s
 import { getThread, type ThreadResult } from './imap/thread.js';
 import { log as defaultLogger, redact, type Logger } from './log.js';
 import { createSharedQuota, type FetchFn, type SharedQuota } from './quota.js';
-import { settingsPlace } from './runtime.js';
+import { getRuntime, settingsPlace } from './runtime.js';
 import { buildMessageView, type MessageView } from './render.js';
 import { CONFIRM_DISABLE_HINT, buildDeleteConfirmationMessage, createConfirmer, type ConfirmFn } from './safety/confirm.js';
 import { isRiskyFileName, markQuarantined, type PathContext } from './safety/paths.js';
@@ -612,6 +612,8 @@ export class MailService {
   // -------------------------------------------------------------------------------------------
 
   private async audited<T>(entry: { tool: string; mailbox?: string; uids?: number[]; destination?: string; [k: string]: unknown }, fn: () => Promise<T>, summarize: (r: T) => Record<string, unknown> = () => ({})): Promise<T> {
+    // In the cloud several logins share one audit trail (the Vercel logs): say whose mailbox changed.
+    if (getRuntime() === 'cloud') entry = { ...entry, account: this.config.email };
     try {
       const result = await fn();
       await this.audit.record({ ...entry, result: 'ok', ...summarize(result) });

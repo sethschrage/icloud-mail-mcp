@@ -8,7 +8,7 @@ import type { CallToolResult } from '@modelcontextprotocol/client';
 import { createCloudHandler, type CloudHandler } from '../../src/http/handler.js';
 import { setRuntime } from '../../src/runtime.js';
 import { cloudEnv, connectCloud, FakeUpstash, resultText } from '../helpers/cloud.js';
-import { ACCOUNT, PASSWORD, findSidecarByMessageId, listSidecars, rawUidsByMessageId, resetMailServer } from '../helpers/infra.js';
+import { ACCOUNT, findSidecarByMessageId, listSidecars, rawUidsByMessageId, resetMailServer } from '../helpers/infra.js';
 import { json, leadingJson, toToolCall } from '../helpers/mcp.js';
 
 const SENT = 'Sent Messages';
@@ -47,7 +47,8 @@ describe('reading over HTTP', () => {
 
   it('works with a login sent in connector headers instead of the env', async () => {
     const h = createCloudHandler({ env: cloudEnv({ ICLOUD_EMAIL: undefined, ICLOUD_PASSWORD: undefined }), serviceDeps: { quotaFetch: fake.fetch } });
-    const s = await connectCloud(h, { headers: { 'X-ICloud-Email': ACCOUNT, 'X-ICloud-Password': PASSWORD } });
+    // test-infra/dovecot/users: the same mailbox under a login with an app-password-shaped password.
+    const s = await connectCloud(h, { headers: { 'X-ICloud-Email': 'testuser@header.test', 'X-ICloud-Password': 'abcd-efgh-ijkl-mnop' } });
     const r = await call(s, 'get_message', { mailbox: 'INBOX', uid: 1 });
     expect(r.isError).toBeFalsy();
     expect(resultText(r)).toMatch(/BEGIN UNTRUSTED EMAIL CONTENT/);
@@ -59,12 +60,12 @@ describe('reading over HTTP', () => {
   });
 
   it('reports a wrong password with the iCloud guidance, never the password itself', async () => {
-    const s = await connectCloud(handler, { headers: { 'X-ICloud-Email': ACCOUNT, 'X-ICloud-Password': 'wrong-pass-7781' } });
+    const s = await connectCloud(handler, { headers: { 'X-ICloud-Email': ACCOUNT, 'X-ICloud-Password': 'wxyz-wxyz-wxyz-wxyz' } });
     const r = await call(s, 'list_mailboxes');
     expect(r.isError).toBe(true);
     expect(resultText(r)).toMatch(/app-specific password/);
     expect(resultText(r)).toMatch(/X-ICloud-Password connector header or set ICLOUD_PASSWORD/);
-    expect(resultText(r)).not.toContain('wrong-pass-7781');
+    expect(resultText(r)).not.toContain('wxyz-wxyz-wxyz-wxyz');
     await s.close();
   });
 });

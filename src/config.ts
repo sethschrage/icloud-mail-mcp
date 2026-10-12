@@ -424,8 +424,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   }
 
   const saveSentCopy = bool('MAIL_SAVE_SENT_COPY', true);
-  // In the cloud the Vercel function's own limit (vercel.json maxDuration, 60 s) must come later.
-  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', cloud ? 50 : 120, 5, 3600, { lenient: true });
+  // In the cloud the Vercel function's own limit (vercel.json maxDuration, 60 s) must come later,
+  // so a longer setting is capped at 50 s (Vercel would otherwise cut the call off with a 504).
+  const operationTimeoutSeconds = int('MAIL_OPERATION_TIMEOUT_SECONDS', cloud ? 50 : 120, 5, cloud ? 50 : 3600, { lenient: true });
 
   const logLevelRaw = str('MAIL_LOG_LEVEL');
   let logLevel: LogLevel = 'warn';
@@ -519,7 +520,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
 
 /** Config error for a cloud deployment with no iCloud login (headers or env). */
 export const CLOUD_NO_LOGIN =
-  'No iCloud login was provided. Either add the headers X-ICloud-Email (your iCloud Mail address) and X-ICloud-Password (an app-specific password) to the connector, or set ICLOUD_EMAIL and ICLOUD_PASSWORD (Sensitive, Production) in the Vercel project\'s environment variables. Create the app-specific password at account.apple.com > Sign-In and Security > App-Specific Passwords.';
+  'No iCloud login was provided. Either add the headers X-ICloud-Email (your iCloud Mail address) and X-ICloud-Password (an app-specific password) to the connector, or set ICLOUD_EMAIL and ICLOUD_PASSWORD (mark the password Sensitive) for Production in the Vercel project\'s environment variables and redeploy. Create the app-specific password at account.apple.com > Sign-In and Security > App-Specific Passwords.';
 
 /** Effective feature switches after MAIL_READ_ONLY overrides the others (SPEC §3). */
 export function effectiveFeatures(config: Config): {

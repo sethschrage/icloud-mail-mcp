@@ -4,3 +4,6 @@
 # which accepts either the name part or the full address as the IMAP/SMTP username.
 testuser:{PLAIN}app-specific-pass::::::
 testuser@icloud.test:{PLAIN}app-specific-pass::::::
+# Same mailbox again, with a password shaped like an Apple app-specific password: the cloud
+# version only accepts that shape in the X-ICloud-Password connector header.
+testuser@header.test:{PLAIN}abcd-efgh-ijkl-mnop::::::

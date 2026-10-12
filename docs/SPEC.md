@@ -455,16 +455,16 @@ A second entry point serves the same tools over stateless Streamable HTTP from a
 - **Files:** `src/http/handler.ts` (createCloudHandler), `src/http/vercel.ts`, `api/icloud-mail.js`, `scripts/build-vercel.mjs` (run as `vercel-build`) and `vercel.json` (maxDuration 60 s).
 - **Runtime flag:** `src/runtime.ts` holds `local` or `cloud`. `loadConfig({runtime})` and the wording of messages and tool descriptions follow it.
 - **Access:** every request needs `MCP_ACCESS_KEY` (32+ characters, constant-time compare), sent as `?key=` or `Authorization: Bearer`. A wrong key gets 401; a missing or short key gets 503.
-- **Login:** the `X-ICloud-Email` / `X-ICloud-Password` (and optional `X-ICloud-From`) headers, else `ICLOUD_EMAIL` / `ICLOUD_PASSWORD`. Each login gets one MailService (with its MCP handler), cached per warm instance under sha256(login), with at most 16 cached and least-recently-used eviction. A header login does not inherit the env's identity variables.
+- **Login:** the `X-ICloud-Email` / `X-ICloud-Password` (and optional `X-ICloud-From`) headers, else `ICLOUD_EMAIL` / `ICLOUD_PASSWORD`. Header values are validated first (an email address; an app-specific password, four groups of four letters) and never quoted in errors; only a valid header password is registered with the redactor, and it is forgotten again when its login is closed. Each login gets one MailService (with its MCP handler), cached per warm instance under sha256(login), with at most 16 cached and least-recently-used eviction; an evicted login is closed once no request is still using it. A header login does not inherit the env's identity variables.
 - **No disk:**
   - download_attachment returns images (≤ 3 MB) and text (≤ 200 KB) inline and only describes other files; it is read-only there.
   - The `attachments` (local files) parameter is removed from send_email, reply_to_message and save_draft.
   - Forwarding attachments from the mailbox still works.
 - **Sending:** there is no Mac dialog, and `MAIL_CONFIRM_DIALOG` is a configuration error in the cloud. Send and recipient limits are also counted in Upstash Redis (`src/quota.ts`):
-  - sliding window;
-  - increment-then-rollback when over a limit;
-  - released when a send fails;
+  - exact rolling windows (one sorted set per limit per account, members timestamped; no rolling hour or day ever holds more than the limit);
+  - add-then-remove when over a limit, and when Upstash's answer is unclear;
+  - released by ZREM when a send fails (retried on the next call if the release fails);
   - fail closed when Upstash is unreachable.
   Without a store, sends are refused unless `MAIL_RATE_LIMIT_STORE=memory`.
-- **Audit trail:** written to stdout (the Vercel logs), each line prefixed `icloud-mail-audit`. Locally `MAIL_AUDIT_LOG=stdout` is refused, because stdout carries the protocol there.
-- **Defaults:** `MAIL_OPERATION_TIMEOUT_SECONDS` is 50 s in the cloud. A missing `MAIL_TIMEZONE` gives a warning, because Vercel runs in UTC.
+- **Audit trail:** written to stdout (the Vercel logs), each line prefixed `icloud-mail-audit`; mailbox changes also record the `account`. Locally `MAIL_AUDIT_LOG=stdout` is refused, because stdout carries the protocol there.
+- **Defaults:** `MAIL_OPERATION_TIMEOUT_SECONDS` is 50 s in the cloud, and higher values are capped at 50 s (Vercel's `maxDuration` is 60 s). Post-send work that outlives a tool call (the Sent copy) is kept alive with Vercel's `waitUntil`. A missing `MAIL_TIMEZONE` gives a warning, because Vercel runs in UTC.

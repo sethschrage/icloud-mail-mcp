@@ -45,7 +45,8 @@ Access and login follow the pattern of your buxfer-mcp:
   optionally `X-ICloud-From`) if the caller sends them, otherwise from the Vercel env vars
   `ICLOUD_EMAIL` / `ICLOUD_PASSWORD`. Headers never replace the access key.
 - **Connection reuse.** The IMAP connection for a login is kept while the Vercel instance stays
-  warm. The cache is keyed by a SHA-256 of email + password, never the raw values.
+  warm. The cache is keyed by a SHA-256 of email + password, never the raw values. Up to 16
+  logins are kept; the least recently used one is closed once no request is using it.
 - **Secrets stay hidden.** Passwords and the access key are never logged or returned. Error
   messages repeat only what Apple's servers said, and the tests check that a password never
   appears in an error.
@@ -59,10 +60,10 @@ Access and login follow the pattern of your buxfer-mcp:
 | Password | macOS Keychain (via the extension settings) | Vercel env var (Sensitive), or a connector header |
 | Opening attachments | saved to `~/Downloads/iCloud Mail Attachments`; images and text also shown | not saved (no disk): images up to 3 MB and text up to 200 KB come back inline; other files (PDFs, documents) are described by name, type and size |
 | Attaching files | files from Desktop, Documents, Downloads | not available (no disk). Share files with a link from another connector (e.g. Google Drive) in the body, or forward an email with its attachments (`forward_message`, or `save_draft` with `forward_of`) |
-| Confirmation before sending | Claude's approval prompt, plus an optional Mac dialog | Claude's approval prompt (send tools are marked destructive, so Claude asks every time unless you change that tool's permission) |
+| Confirmation before sending | Claude's approval prompt, plus an optional Mac dialog | Claude's approval prompt. Send tools are marked destructive and as always requiring approval, so Claude asks on every send |
 | Send limits | counted in memory on your Mac | counted in Upstash Redis, shared by every Vercel instance |
 | Audit trail | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` | Vercel logs (lines start with `icloud-mail-audit`) |
-| Time limit per tool call | 120 s | 50 s (the Vercel function may run 60 s) |
+| Time limit per tool call | 120 s | 50 s at most (the Vercel function may run 60 s) |
 
 All 19 tools are available in both, with the same names. Permanent delete stays off unless you
 set `MAIL_ALLOW_PERMANENT_DELETE=true`.
@@ -79,6 +80,9 @@ App-Specific Passwords**. Use a new one just for the cloud version, so you can r
 2. Framework preset: **Other**. Leave the build and output settings at their defaults:
    - Vercel runs `npm run vercel-build`, which bundles the server into `build/vercel/handler.mjs`.
    - `api/icloud-mail.js` re-exports that bundle.
+   - The output directory is `public/`, which only holds a `robots.txt`. Vercel needs it because
+     `package.json` has a `build` script (the Mac extension's); without it the build fails with
+     "No Output Directory named "public" found".
 3. Don't deploy yet; add the environment variables first (step 3). If Vercel deploys right away,
    that first deployment just answers `503` until the variables are set and you redeploy.
 
@@ -88,8 +92,11 @@ Pushing to `main` deploys to production from then on.
 
 1. In the project: **Storage → Create Database → Upstash for Redis** (from the Marketplace; the
    free tier is plenty).
-2. Connect it to the project for **Production** (and Preview, if you use previews).
-3. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN`; the server reads those.
+2. Connect it to the project for **Production** (and Preview, if you use previews). Type `KV` as
+   the custom prefix: the form suggests `STORAGE`, which would create `STORAGE_REST_API_URL`,
+   names the server does not read.
+3. Vercel adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` (plus a read-only token and `KV_URL` /
+   `KV_REDIS_URL`, which are not used); the server reads those two.
 4. If you create the database on upstash.com instead, set `UPSTASH_REDIS_REST_URL` and
    `UPSTASH_REDIS_REST_TOKEN` yourself.
 
@@ -105,7 +112,7 @@ then never shows the value again, and only the deployed function can read it.
 | Variable | Value | Sensitive |
 |---|---|---|
 | `MCP_ACCESS_KEY` | A new random key, see below. Keep it in Apple Passwords. | yes |
-| `ICLOUD_EMAIL` | Your primary **@icloud.com** address. Use it even if you send from a custom domain. | no |
+| `ICLOUD_EMAIL` | Your primary iCloud Mail address (e.g. @icloud.com, or the @me.com / @mac.com one if that is your primary address). Use it even if you send from a custom domain. | no |
 | `ICLOUD_PASSWORD` | The app-specific password (`xxxx-xxxx-xxxx-xxxx`) | yes |
 | `MAIL_TIMEZONE` | Your time zone, e.g. `America/Los_Angeles`. Vercel runs in UTC. | no |
 | `MAIL_FROM_ADDRESS` | Only if you send from a custom-domain address or alias | no |
@@ -132,26 +139,34 @@ folders (`MAIL_ATTACHMENT_DIR`, `MAIL_ATTACH_FROM_DIRS`) are ignored in the clou
 
 Deploy (or redeploy after changing variables). Then:
 
+Your production domain is on the project's **Settings → Domains** page; for this project it is
+`icloud-mail-mcp-seth-schrage.vercel.app`. Don't guess it: `icloud-mail-mcp.vercel.app` belongs to someone else's
+project, and a connector pointed there would hand them your access key.
+
 ```bash
-URL="https://icloud-mail-mcp.vercel.app/api/icloud-mail"   # your project's domain
+URL="https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail"
 KEY="<the access key>"
 
 # 401 without the key
 curl -s -X POST "$URL" -H 'content-type: application/json' -d '{}'
 
-# The tool list with it
-curl -s -X POST "$URL?key=$KEY" \
+# Initialize with it (prints one `data:` line whose serverInfo name is icloud-mail)
+curl -s -X POST "$URL" -H "authorization: Bearer $KEY" \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
 
 ### 5. Connect Claude
 
-**claude.ai, the mobile apps and Claude Desktop:**
-1. Go to **Settings → Connectors → Add custom connector**.
+**claude.ai, Claude Desktop (and from there the mobile apps):**
+1. Go to **Customize → Connectors**, click **+ Add → Add custom connector**. (On Team and
+   Enterprise plans an Owner adds it under **Organization settings → Connectors**.)
 2. Name: `iCloud Mail`.
-3. URL: `https://icloud-mail-mcp.vercel.app/api/icloud-mail?key=<MCP_ACCESS_KEY>`
-4. Leave the OAuth fields empty ("No sign-in").
+3. URL: `https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail`, then **Continue**.
+4. Under **Authentication** choose **No sign in**. Under **Request headers** add
+   `Authorization` with the value `Bearer <MCP_ACCESS_KEY>`. Then **Add**.
+   - If your client has no Request headers field, append the key to the URL instead:
+     `https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail?key=<MCP_ACCESS_KEY>`.
 5. Then ask: "Use iCloud Mail to show my account info." It should list your folders as
    *Sent Messages*, *Deleted Messages*, *Archive*, *Drafts* and *Junk*, and
    `shared_send_limits.store` should be `upstash`.
@@ -162,36 +177,39 @@ turn one off). Otherwise Claude sees two sets of identical tools.
 **Claude Code** (the key in a header instead of the URL):
 
 ```bash
-claude mcp add --transport http icloud-mail https://icloud-mail-mcp.vercel.app/api/icloud-mail \
+claude mcp add --transport http icloud-mail https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail \
   --header "Authorization: Bearer <MCP_ACCESS_KEY>"
 ```
 
 ## Logging in with connector headers instead
 
-A client that can send custom headers (Claude Code, or any MCP client) can bring its own iCloud
-login. The server's env login is then not used for that request:
+A client that can send custom headers (Claude Code, a claude.ai connector's Request headers, or
+any MCP client) can bring its own iCloud login. The server's env login is then not used for that
+request:
 
 | Header | Value |
 |---|---|
 | `X-ICloud-Email` | iCloud Mail address (the @icloud.com one) |
-| `X-ICloud-Password` | app-specific password |
+| `X-ICloud-Password` | app-specific password (`xxxx-xxxx-xxxx-xxxx`; anything else is refused) |
 | `X-ICloud-From` | optional default From (alias or custom-domain address) |
 
-- **Both or neither.** Send both email and password, or neither. A partial set is reported, never
-  mixed with the env login.
+- **Both or neither.** Send both email and password, or neither. `X-ICloud-From` only works
+  together with them; on its own it counts as an incomplete set. An incomplete or malformed set
+  is reported (without repeating the header values), never mixed with the env login.
 - **Separate identity.** A header login does not inherit the env's identity settings
   (`MAIL_FROM_ADDRESS`, `MAIL_ALLOWED_FROM`, `ICLOUD_IMAP_USER`, ...).
-- **Separate send limits.** Each login has its own limits.
+- **Separate send limits per address.** Limits are counted per iCloud address, so a header login
+  for a different address has its own limits (and one for the same address shares them).
 - **Still needs the access key.** The access key is required either way.
 
 ```bash
-claude mcp add --transport http icloud-mail https://icloud-mail-mcp.vercel.app/api/icloud-mail \
+claude mcp add --transport http icloud-mail https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail \
   --header "Authorization: Bearer <MCP_ACCESS_KEY>" \
   --header "X-ICloud-Email: you@icloud.com" --header "X-ICloud-Password: xxxx-xxxx-xxxx-xxxx"
 ```
 
-claude.ai custom connectors set up with "No sign-in" send no custom headers, so they always use
-the env login.
+In a claude.ai custom connector, add the same headers under **Request headers**. Without them it
+uses the env login.
 
 ## Send limits: why Upstash
 
@@ -209,17 +227,17 @@ process, so counting in memory is exact. On Vercel it isn't:
   - The cost is one free Marketplace database, two env vars, and a few milliseconds per send.
   - **It fails closed:** if Upstash can't be reached, nothing is sent (drafts still work), rather
     than sending without limits.
-  - Counters use a sliding window, so a burst at the top of the hour can't double the limit.
+  - Limits are counted over an exact rolling hour (and rolling 24 hours): no 60-minute (or
+    24-hour) span ever holds more than the limit, at the top of the hour or anywhere else.
   - Counters are keyed by a hash of the email address, never the address.
 
 You chose shared limits. With `MAIL_ALLOW_SEND=false` (drafts only), Upstash isn't needed at all.
 
 ## Security notes
 
-- **Who can use it.** Anyone with the connector URL (which contains the access key) can use your
-  mailbox through this server.
-  - Treat the URL like a password.
-  - To revoke access, change `MCP_ACCESS_KEY` in Vercel, redeploy, and update the connector URL.
+- **Who can use it.** Anyone with the access key can use your mailbox through this server.
+  - Treat it (and a connector URL that contains it) like a password.
+  - To revoke access, change `MCP_ACCESS_KEY` in Vercel, redeploy, and update the connector.
 - **Password storage.** The app-specific password is stored as a Sensitive Vercel env var, not
   readable in the dashboard after it's saved.
   - It can read and send mail. Apple's app-specific passwords also work for iCloud contacts and
@@ -228,14 +246,15 @@ You chose shared limits. With `MAIL_ALLOW_SEND=false` (drafts only), Upstash isn
     Apple Account password changes.
   - Using a separate one for the cloud version lets you revoke it without breaking the Mac
     extension.
-- **The key in the URL.** The access key travels in the URL, as with buxfer-mcp.
+- **The key in the URL.** With `?key=`, the access key travels in the URL, as with buxfer-mcp.
   - The server never logs URLs or request headers.
   - Vercel's own request logs, visible to your team only, may show request paths.
-  - Prefer `Authorization: Bearer` in clients that support headers (Claude Code).
+  - Prefer `Authorization: Bearer` in clients that support headers (Claude Code, and claude.ai's
+    Request headers).
 - **Untrusted email content.** It's handled as in the Mac version: email content is marked as
   untrusted, and every send needs your approval in Claude.
-- **Audit trail.** The Vercel logs keep an entry for every change and send (tool, recipients,
-  subject, Message-ID; never bodies). Search the logs for `icloud-mail-audit`.
+- **Audit trail.** The Vercel logs keep an entry for every change and send (tool, account,
+  recipients, subject, Message-ID; never bodies). Search the logs for `icloud-mail-audit`.
 
 ## Troubleshooting
 
@@ -244,10 +263,11 @@ You chose shared limits. With `MAIL_ALLOW_SEND=false` (drafts only), Upstash isn
 | `503 server not configured` | `MCP_ACCESS_KEY` is missing or under 32 characters. Set it, then redeploy. |
 | `401 unauthorized` | The key in the connector URL (or Bearer header) does not match `MCP_ACCESS_KEY`. |
 | "No iCloud login was provided" | Set `ICLOUD_EMAIL` and `ICLOUD_PASSWORD` (then redeploy), or send the login headers. |
-| iCloud rejected the login | Use the @icloud.com address and an app-specific password (not your Apple Account password). Create a new one if you changed your Apple Account password. |
+| "Login headers not usable" | `X-ICloud-Email` must be an email address and `X-ICloud-Password` an app-specific password. Check that they aren't swapped. |
+| iCloud rejected the login | Use your primary iCloud Mail address and an app-specific password (not your Apple Account password). Create a new one if you changed your Apple Account password. |
 | "Not sent: … Upstash …" | Add Upstash for Redis (step 2) and redeploy, or check that its token is still valid. |
 | Dates are in UTC | Set `MAIL_TIMEZONE`. |
-| A tool times out | The Vercel function may run 60 s (`vercel.json`). Large searches across all mailboxes can take longer; narrow the search. |
+| A tool times out | Each tool call stops after 50 s (`MAIL_OPERATION_TIMEOUT_SECONDS`; higher values are capped at 50 s), inside the function's 60 s `maxDuration` in `vercel.json`. Searches across all mailboxes can take longer; narrow the search. |
 | Logs | Vercel → the project → **Logs**. Set `MAIL_LOG_LEVEL=info` for more detail (never passwords or message text). |
 
 To run the cloud handler locally:

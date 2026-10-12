@@ -6,16 +6,24 @@
  * their own. The cloud version therefore also counts in Upstash Redis (REST API, plain fetch, no
  * extra dependency):
  *
- * - three counters per account: sends per hour, recipients per hour, recipients per day;
- * - a sliding-window estimate (current fixed window + the previous one, weighted by how much of it
- *   still overlaps), so a burst at a window boundary cannot double the limit;
- * - reserve() increments first and rolls back when over a limit, so concurrent instances cannot
- *   both slip under it; a send that then fails releases its reservation;
+ * - one sorted set per limit per account (sends per hour, recipients per hour, recipients per
+ *   day). Each reservation adds one member `<random id>:<n>` (n = 1 send, or the recipient count)
+ *   scored with the time it was made;
+ * - exact rolling windows: reserve() first drops members older than the window, adds its own,
+ *   then reads the set back and sums n. If that sum is over a limit it removes its own members
+ *   again and refuses. A reservation is only kept when the set, including it, fits the limit, so
+ *   no rolling hour (or day) ever holds more than the limit, at a window boundary or anywhere
+ *   else. Two concurrent reservations near the limit can both be refused (each sees the other);
+ *   that errs towards refusing, never towards letting extra mail through;
+ * - removal is by member (ZREM), which is idempotent and never creates a key: a send that fails
+ *   releases its reservation that way (retried on the next call if the release itself fails),
+ *   and when the answer to a reservation is unclear (timeout, HTTP error, error in any command)
+ *   its members are removed best-effort before the error is reported, so nothing leaks;
  * - fail closed: if Upstash cannot be reached, nothing is sent (drafts still work).
  *
  * Account keys are a hash of the email address, never the address itself.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Config } from './config.js';
 import { MailError } from './errors.js';
 import { log as defaultLogger, redact, type Logger } from './log.js';
@@ -109,28 +117,37 @@ export class UpstashQuota implements SharedQuota {
       { name: 'rcpt_h', windowMs: HOUR, max: opts.maxRecipientsPerHour, env: 'MAIL_MAX_RECIPIENTS_PER_HOUR', what: 'recipients per hour' },
       { name: 'rcpt_d', windowMs: DAY, max: opts.maxRecipientsPerDay, env: 'MAIL_MAX_RECIPIENTS_PER_DAY', what: 'recipients per day' },
     ];
-    this.prefix = `icloud-mail:v1:${accountKey(opts.email)}`;
+    this.prefix = `icloud-mail:v2:${accountKey(opts.email)}`;
     this.fetchFn = opts.fetch ?? (globalThis.fetch as unknown as FetchFn);
     this.now = opts.now ?? Date.now;
     this.timeoutMs = opts.timeoutMs ?? 5000;
     this.logger = opts.logger ?? defaultLogger;
   }
 
-  private keys(m: Metric, at: number): { cur: string; prev: string; elapsed: number } {
-    const index = Math.floor(at / m.windowMs);
-    return { cur: `${this.prefix}:${m.name}:${index}`, prev: `${this.prefix}:${m.name}:${index - 1}`, elapsed: (at % m.windowMs) / m.windowMs };
+  private key(m: Metric): string {
+    return `${this.prefix}:${m.name}`;
   }
 
   private amount(m: Metric, recipients: number): number {
     return m.name === 'sends_h' ? 1 : recipients;
   }
 
-  /** Sliding-window estimate: all of the current window plus the still-overlapping share of the previous one. */
-  private static estimate(cur: number, prev: number, elapsed: number): number {
-    return cur + prev * (1 - elapsed);
+  /** Sum of the `n` suffixes of sorted-set members `<id>:<n>` (a ZRANGE / ZRANGEBYSCORE answer). */
+  private static sum(members: unknown): number {
+    if (!Array.isArray(members)) {
+      throw new MailError('CONNECTION', 'Not sent: the send-limit store (Upstash Redis) gave an unexpected answer. Try again shortly, or save a draft instead.');
+    }
+    let total = 0;
+    for (const member of members) {
+      const s = String(member);
+      const n = Number(s.slice(s.lastIndexOf(':') + 1));
+      if (Number.isFinite(n)) total += n;
+    }
+    return total;
   }
 
-  private async pipeline(commands: string[][]): Promise<Array<number | null>> {
+  /** POST {url}/pipeline; returns each command's `result`. Any failure is a CONNECTION error. */
+  private async pipeline(commands: string[][]): Promise<unknown[]> {
     let res: Awaited<ReturnType<FetchFn>>;
     try {
       res = await this.fetchFn(`${this.opts.url}/pipeline`, {
@@ -151,33 +168,52 @@ export class UpstashQuota implements SharedQuota {
     }
     return body.map((r) => {
       if (r && r.error !== undefined) throw new MailError('CONNECTION', `Not sent: the send-limit store (Upstash Redis) reported an error (${String(r.error).slice(0, 200)}).`);
-      const v = r?.result;
-      if (v === null || v === undefined) return null;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
+      return r?.result ?? null;
     });
+  }
+
+  /** Remove these members (idempotent; creates no key, so safe even if they were never added). */
+  private removeCommands(members: Array<{ key: string; member: string }>): string[][] {
+    return members.map(({ key, member }) => ['ZREM', key, member]);
   }
 
   async reserve(recipients: number): Promise<QuotaReservation> {
     const active = this.metrics.filter((m) => m.max > 0);
     if (active.length === 0) return NOOP_RESERVATION;
     const at = this.now();
-    const commands: string[][] = [];
+    const id = randomUUID();
     const plan = active.map((m) => {
-      const k = this.keys(m, at);
       const n = this.amount(m, recipients);
-      commands.push(['INCRBY', k.cur, String(n)], ['PEXPIRE', k.cur, String(m.windowMs * 2 + 60_000)], ['GET', k.prev]);
-      return { m, k, n };
+      return { m, n, key: this.key(m), member: `${id}:${n}` };
     });
-    const results = await this.pipeline(commands);
-    const decrements = plan.map(({ k, n }) => ['DECRBY', k.cur, String(n)]);
+    const commands = plan.flatMap(({ m, key, member }) => [
+      ['ZREMRANGEBYSCORE', key, '-inf', String(at - m.windowMs)],
+      ['ZADD', key, String(at), member],
+      ['PEXPIRE', key, String(m.windowMs + 60_000)],
+      ['ZRANGE', key, '0', '-1'],
+    ]);
+    const remove = this.removeCommands(plan);
+    const cleanUp = (what: string) =>
+      this.pipeline(remove).then(
+        () => undefined,
+        (err: unknown) => this.logger.warn(what, { err: redact(String(err)) }),
+      );
+
+    let used: number[];
+    try {
+      const results = await this.pipeline(commands);
+      used = plan.map((_, i) => UpstashQuota.sum(results[i * 4 + 3]));
+    } catch (err) {
+      // The request may have reached Upstash and been applied: take our members back out.
+      await cleanUp('could not remove a send-limit reservation after an unclear answer from the store');
+      throw err;
+    }
     for (let i = 0; i < plan.length; i++) {
-      const { m, k, n } = plan[i] as (typeof plan)[number];
-      const cur = results[i * 3] ?? n;
-      const prev = results[i * 3 + 2] ?? 0;
-      if (UpstashQuota.estimate(cur, prev, k.elapsed) > m.max) {
-        await this.pipeline(decrements).catch((err) => this.logger.warn('could not roll back a refused send-limit reservation', { err: redact(String(err)) }));
-        const remaining = Math.max(0, Math.floor(m.max - UpstashQuota.estimate(cur - n, prev, k.elapsed)));
+      const { m, n } = plan[i] as (typeof plan)[number];
+      const sum = used[i] as number;
+      if (sum > m.max) {
+        await cleanUp('could not roll back a refused send-limit reservation');
+        const remaining = Math.max(0, Math.floor(m.max - (sum - n)));
         throw new MailError(
           'RATE_LIMIT',
           m.name === 'sends_h'
@@ -190,23 +226,29 @@ export class UpstashQuota implements SharedQuota {
     return {
       release: async () => {
         if (released) return;
-        released = true;
-        await this.pipeline(decrements).catch((err) => this.logger.warn('could not release a send-limit reservation', { err: redact(String(err)) }));
+        try {
+          await this.pipeline(remove);
+          released = true;
+        } catch (err) {
+          this.logger.warn('could not release a send-limit reservation', { err: redact(String(err)) });
+        }
       },
     };
   }
 
   async status(): Promise<Record<string, unknown>> {
     const at = this.now();
-    const plan = this.metrics.map((m) => ({ m, k: this.keys(m, at) }));
+    const active = this.metrics.filter((m) => m.max > 0);
     try {
-      const results = await this.pipeline(plan.flatMap(({ k }) => [['GET', k.cur], ['GET', k.prev]]));
+      const results = active.length
+        ? await this.pipeline(active.map((m) => ['ZRANGEBYSCORE', this.key(m), `(${at - m.windowMs}`, '+inf']))
+        : [];
       const out: Record<string, unknown> = { store: 'upstash' };
-      plan.forEach(({ m, k }, i) => {
-        const used = UpstashQuota.estimate(results[i * 2] ?? 0, results[i * 2 + 1] ?? 0, k.elapsed);
+      for (const m of this.metrics) {
+        const i = active.indexOf(m);
         out[m.name === 'sends_h' ? 'sends_remaining_this_hour' : m.name === 'rcpt_h' ? 'recipients_remaining_this_hour' : 'recipients_remaining_today'] =
-          m.max > 0 ? Math.max(0, Math.floor(m.max - used)) : 'unlimited';
-      });
+          i < 0 ? 'unlimited' : Math.max(0, Math.floor(m.max - UpstashQuota.sum(results[i])));
+      }
       return out;
     } catch (err) {
       return { store: 'upstash', error: err instanceof MailError ? err.message : 'unreachable' };

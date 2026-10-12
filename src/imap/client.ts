@@ -11,10 +11,17 @@
  *   for the process lifetime.
  * - imapflow never gets its default (stdout) logger.
  * - A tool call that is abandoned (deadline or client cancellation, see context.ts) while one of
- *   its IMAP commands is still pending closes that connection: imapflow then rejects the pending
- *   command and drops its mailbox lock, and the next call reconnects instead of waiting minutes
- *   behind a command that will never finish (a half-open socket after a network change, or a
- *   SEARCH iCloud never answers). A mailbox lock wait that times out is treated the same way.
+ *   its IMAP commands is still pending stops waiting at once. If no other call is using that
+ *   connection, it is closed: imapflow then rejects the pending command and drops its mailbox
+ *   lock, and the next call reconnects instead of waiting minutes behind a command that will never
+ *   finish (a half-open socket after a network change, or a SEARCH iCloud never answers). If other
+ *   calls are using it (concurrent requests on one warm cloud instance), it is left to them: the
+ *   abandoned command either finishes, or the connection is closed when the last of those calls
+ *   is abandoned too, or as soon as none of them uses it any more while the abandoned command is
+ *   still pending. A mailbox lock wait that times out is treated the same way.
+ * - When a call's connection is closed underneath it before its work started (still waiting for
+ *   the connection or the mailbox lock), it retries once on a new connection, writes included;
+ *   once a write has started, it reports that the change may or may not have been applied.
  * - Without implicit TLS (IMAP_SECURE=false) STARTTLS is required, so a network attacker cannot
  *   strip it and read the app-specific password; IMAP_ALLOW_PLAINTEXT=true (tests only) relaxes it.
  */
@@ -201,11 +208,11 @@ export function mapImapError(err: unknown, ctx: { host: string; port: number; us
     return new MailError('CONNECTION', 'Timed out waiting for another mail operation on this connection to finish; the connection was reset. Try again.', { cause: err });
   }
   if (code && CONNECTION_ERROR_CODES.has(code)) {
-    return new MailError(
-      'CONNECTION',
-      `Could not talk to the IMAP server ${where} (${code}). Check the Mac's internet connection; iCloud may also be temporarily unavailable. The next request will reconnect.`,
-      { cause: err },
-    );
+    const advice =
+      getRuntime() === 'cloud'
+        ? 'Check that iCloud Mail is reachable; iCloud may be temporarily unavailable.'
+        : "Check the Mac's internet connection; iCloud may also be temporarily unavailable.";
+    return new MailError('CONNECTION', `Could not talk to the IMAP server ${where} (${code}). ${advice} The next request will reconnect.`, { cause: err });
   }
   if (e.responseStatus === 'NO' || e.responseStatus === 'BAD') {
     const text = typeof e.responseText === 'string' && e.responseText ? e.responseText : errorMessage(err);
@@ -255,6 +262,12 @@ export class ImapManager {
   private lastActivity = Date.now();
   private readonly healthCheckAfterMs: number;
   private caCache: string | null | undefined;
+  /** Calls currently using each connection (each with its call's abort signal, if any). */
+  private readonly users = new WeakMap<ImapFlow, Set<{ signal: AbortSignal | undefined }>>();
+  /** Per connection: abandoned calls whose work is still pending on it. */
+  private readonly orphans = new WeakMap<ImapFlow, number>();
+  /** Connections this manager closed itself (as opposed to the server or the network). */
+  private readonly closedHere = new WeakSet<ImapFlow>();
   private readonly logger: Logger;
   private readonly idleCloseMs: number;
   private readonly lockTimeoutMs: number;
@@ -411,6 +424,7 @@ export class ImapManager {
     if (existing && existing.usable && this.active <= 1 && !(await this.healthy(existing))) {
       this.logger.info('IMAP connection did not answer NOOP; reconnecting');
       if (this.client === existing) this.client = null;
+      this.closedHere.add(existing);
       try {
         existing.close();
       } catch {
@@ -459,6 +473,8 @@ export class ImapManager {
    */
   private abandon(client: ImapFlow, reason: string): void {
     if (this.client === client) this.client = null;
+    if (this.closedHere.has(client)) return;
+    this.closedHere.add(client);
     this.logger.info('closing the IMAP connection', { reason });
     try {
       client.close();
@@ -467,19 +483,58 @@ export class ImapManager {
     }
   }
 
-  private async attempt<T>(fn: (client: ImapFlow) => Promise<T>, retry: boolean): Promise<T> {
+  private usersOf(client: ImapFlow): Set<{ signal: AbortSignal | undefined }> {
+    let set = this.users.get(client);
+    if (!set) {
+      set = new Set();
+      this.users.set(client, set);
+    }
+    return set;
+  }
+
+  /**
+   * Run `fn` on a connection. `fn` calls `started()` right before it sends anything of its own
+   * (after waiting for the mailbox lock), which tells a write whether a retry is still safe.
+   */
+  private async attempt<T>(fn: (client: ImapFlow, started: () => void) => Promise<T>, retry: boolean): Promise<T> {
     const ctx = { host: this.config.imap.host, port: this.config.imap.port, users: this.plannedLogins };
     const signal = currentContext()?.signal;
     for (let attemptNo = 0; ; attemptNo++) {
       throwIfAborted(signal);
       const client = await this.connection();
       throwIfAborted(signal);
-      // The call was abandoned while this command is still pending: nothing will ever read its
-      // result, and a stuck command would block the one connection for everyone else.
-      const onAbort = (): void => this.abandon(client, 'the tool call was abandoned (deadline or cancellation) while an IMAP command was pending');
-      signal?.addEventListener('abort', onAbort, { once: true });
+      const users = this.usersOf(client);
+      const me = { signal };
+      users.add(me);
+      let didStart = false;
+      let abandoned = false;
+      let onAbort: (() => void) | undefined;
+      // The call was abandoned while its work is still pending: stop waiting at once. Nothing will
+      // ever read the result, and a stuck command would block the one connection for everyone
+      // else, so close the connection, unless other calls are still using it: closing it would
+      // fail their commands too (on a warm cloud instance concurrent requests share it). Their own
+      // deadlines still close it if the abandoned command never finishes (see the finally below).
+      const abort = signal
+        ? new Promise<never>((_, reject) => {
+            onAbort = (): void => {
+              abandoned = true;
+              users.delete(me);
+              const othersLive = [...users].some((u) => !u.signal?.aborted);
+              if (othersLive) {
+                this.logger.info('a tool call was abandoned while its IMAP work was pending; leaving the connection to the other calls using it');
+              } else {
+                this.abandon(client, 'the tool call was abandoned (deadline or cancellation) while an IMAP command was pending');
+              }
+              reject(abortError(signal));
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          })
+        : undefined;
+      const work = fn(client, () => {
+        didStart = true;
+      });
       try {
-        return await fn(client);
+        return await (abort ? Promise.race([work, abort]) : work);
       } catch (err) {
         // Never retry work for an abandoned call (a read would silently re-run the stuck command).
         if (signal?.aborted) throw abortError(signal);
@@ -494,13 +549,37 @@ export class ImapManager {
         }
         const dead = !client.usable || isConnectionError(err);
         if (dead && this.client === client) this.client = null;
-        if (dead && retry && attemptNo === 0) {
+        // Nothing of a write was sent yet (it was still waiting for the mailbox lock), so it can
+        // be retried like a read.
+        if (dead && (retry || !didStart) && attemptNo === 0) {
           this.logger.info('IMAP connection was lost; retrying once on a new connection', { code: errorCode(err) });
           continue;
         }
+        if (dead && !retry && didStart && this.closedHere.has(client)) {
+          throw new MailError(
+            'CONNECTION',
+            `The connection to the IMAP server ${ctx.host}:${ctx.port} was reset by another request while this one was in progress (${errorCode(err) ?? 'connection closed'}). ` +
+              'If this was a change (move, flag, delete, create, rename, save), it may or may not have been applied: check before retrying.',
+            { cause: err },
+          );
+        }
         throw mapImapError(err, ctx);
       } finally {
-        signal?.removeEventListener('abort', onAbort);
+        if (onAbort) signal?.removeEventListener('abort', onAbort);
+        users.delete(me);
+        if (abandoned) {
+          // `work` goes on in the background (it releases its mailbox lock when it settles).
+          this.orphans.set(client, (this.orphans.get(client) ?? 0) + 1);
+          const settled = (): void => {
+            this.orphans.set(client, Math.max(0, (this.orphans.get(client) ?? 0) - 1));
+          };
+          work.then(settled, settled);
+        }
+        // The last call using this connection is done while an abandoned call's command is still
+        // pending on it (possibly stuck): close it rather than leave the next call behind it.
+        if (users.size === 0 && (this.orphans.get(client) ?? 0) > 0) {
+          this.abandon(client, 'an abandoned tool call still had an IMAP command pending');
+        }
       }
     }
   }
@@ -509,7 +588,11 @@ export class ImapManager {
   async run<T>(fn: (client: ImapFlow) => Promise<T>, opts: { retry?: boolean } = {}): Promise<T> {
     this.begin();
     try {
-      return await this.attempt(fn, opts.retry ?? false);
+      return await this.attempt(async (client, started) => {
+        // On a connection that is already closed, imapflow rejects every command unsent.
+        if (client.usable) started();
+        return fn(client);
+      }, opts.retry ?? false);
     } finally {
       this.end();
     }
@@ -527,7 +610,7 @@ export class ImapManager {
   async withMailbox<T>(path: string, fn: (client: ImapFlow, mailbox: MailboxObject) => Promise<T>, opts: WithMailboxOptions): Promise<T> {
     this.begin();
     try {
-      return await this.attempt(async (client) => {
+      return await this.attempt(async (client, started) => {
         let lock;
         try {
           lock = await client.getMailboxLock(path, { readOnly: opts.readOnly, acquireTimeout: this.lockTimeoutMs, description: `mcp:${path}` });
@@ -543,6 +626,7 @@ export class ImapManager {
           throwIfAborted(currentContext()?.signal);
           const mailbox = client.mailbox;
           if (!mailbox) throw new MailError('INTERNAL', `Mailbox "${path}" could not be opened.`);
+          started();
           return await fn(client, mailbox);
         } finally {
           lock.release();
@@ -566,6 +650,7 @@ export class ImapManager {
     const client = this.client;
     this.client = null;
     if (!client) return;
+    this.closedHere.add(client);
     this.logger.debug('closing IMAP connection', { reason });
     const logout = client.logout().catch(() => undefined);
     const cap = new Promise<void>((resolve) => {

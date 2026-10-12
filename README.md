@@ -406,7 +406,7 @@ while your Mac is off. It is a second entry point in this repository (`api/iclou
 Mac extension is unchanged. The differences:
 
 - **Access:** every request needs an access key. You add the server in Claude as a custom
-  connector, with the key in its URL.
+  connector, with the key in a request header (or its URL).
 - **Password:** your app-specific password is stored as a Sensitive Vercel environment variable
   (or sent by the connector).
 - **No disk:** attachments are shown inline instead of being saved, and files cannot be attached
