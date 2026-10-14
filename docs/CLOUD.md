@@ -139,12 +139,16 @@ folders (`MAIL_ATTACHMENT_DIR`, `MAIL_ATTACH_FROM_DIRS`) are ignored in the clou
 
 Deploy (or redeploy after changing variables). Then:
 
-Your production domain is on the project's **Settings → Domains** page; for this project it is
-`icloud-mail-mcp-seth-schrage.vercel.app`. Don't guess it: `icloud-mail-mcp.vercel.app` belongs to someone else's
-project, and a connector pointed there would hand them your access key.
+The connector needs a public production domain. Vercel's Standard Protection keeps the URLs it
+generates (including `<project>-<team>.vercel.app`) behind Vercel login, which a connector can't
+pass, so add your own under **Settings → Domains → Add**: any free `<name>.vercel.app` will do.
+This project uses `icloud-mail-connector-mcp.vercel.app`. Don't guess the name: `icloud-mail-mcp.vercel.app`
+belongs to someone else's project, and a connector pointed there would hand them your access key.
+Check that a request without the key gets the server's own `{"error":"unauthorized"}`, not a
+Vercel login page.
 
 ```bash
-URL="https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail"
+URL="https://icloud-mail-connector-mcp.vercel.app/api/icloud-mail"
 KEY="<the access key>"
 
 # 401 without the key
@@ -162,11 +166,15 @@ curl -s -X POST "$URL" -H "authorization: Bearer $KEY" \
 1. Go to **Customize → Connectors**, click **+ Add → Add custom connector**. (On Team and
    Enterprise plans an Owner adds it under **Organization settings → Connectors**.)
 2. Name: `iCloud Mail`.
-3. URL: `https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail`, then **Continue**.
-4. Under **Authentication** choose **No sign in**. Under **Request headers** add
-   `Authorization` with the value `Bearer <MCP_ACCESS_KEY>`. Then **Add**.
+3. URL: `https://icloud-mail-connector-mcp.vercel.app/api/icloud-mail`, then **Continue**.
+4. Under **Authentication** choose **No sign-in**. The form pre-selects "Sign in now (Detected)"
+   because the server answers 401 without the key; left that way, adding fails with "Couldn't
+   register with … sign-in service". Under **Request headers** add `Authorization` with the
+   value `Bearer <MCP_ACCESS_KEY>`. Then **Add**.
+   - Custom connectors can't be added in the mobile apps; once added here they show up there.
+     Turn the connector on in a chat's tools menu.
    - If your client has no Request headers field, append the key to the URL instead:
-     `https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail?key=<MCP_ACCESS_KEY>`.
+     `https://icloud-mail-connector-mcp.vercel.app/api/icloud-mail?key=<MCP_ACCESS_KEY>`.
 5. Then ask: "Use iCloud Mail to show my account info." It should list your folders as
    *Sent Messages*, *Deleted Messages*, *Archive*, *Drafts* and *Junk*, and
    `shared_send_limits.store` should be `upstash`.
@@ -177,7 +185,7 @@ turn one off). Otherwise Claude sees two sets of identical tools.
 **Claude Code** (the key in a header instead of the URL):
 
 ```bash
-claude mcp add --transport http icloud-mail https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail \
+claude mcp add --transport http icloud-mail https://icloud-mail-connector-mcp.vercel.app/api/icloud-mail \
   --header "Authorization: Bearer <MCP_ACCESS_KEY>"
 ```
 
@@ -203,7 +211,7 @@ request:
 - **Still needs the access key.** The access key is required either way.
 
 ```bash
-claude mcp add --transport http icloud-mail https://icloud-mail-mcp-seth-schrage.vercel.app/api/icloud-mail \
+claude mcp add --transport http icloud-mail https://icloud-mail-connector-mcp.vercel.app/api/icloud-mail \
   --header "Authorization: Bearer <MCP_ACCESS_KEY>" \
   --header "X-ICloud-Email: you@icloud.com" --header "X-ICloud-Password: xxxx-xxxx-xxxx-xxxx"
 ```
