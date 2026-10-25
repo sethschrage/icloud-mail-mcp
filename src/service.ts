@@ -436,6 +436,7 @@ export class MailService {
         read_only: f.readOnly,
         drafts: f.drafts,
         confirm_dialog: c.confirmDialog,
+        forward_always_allowable: c.forwardAlwaysAllow,
         save_sent_copy: c.saveSentCopy,
         rate_limit: { max_sends_per_hour: c.maxSendsPerHour === 0 ? 'unlimited' : c.maxSendsPerHour, remaining_this_hour: this.rateLimiter.remaining() ?? 'unlimited' },
         recipient_limit: (() => {

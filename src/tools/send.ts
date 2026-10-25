@@ -1,7 +1,9 @@
 /**
  * Sending (SPEC §6.6): send_email, reply_to_message, forward_message. Registered only when
  * MAIL_ALLOW_SEND is on and MAIL_READ_ONLY is off. Every tool is destructive + open-world and
- * carries `anthropic/requiresUserInteraction`, so the host prompts on every call.
+ * carries `anthropic/requiresUserInteraction`, so the host prompts on every call. The one
+ * exception is forward_message with MAIL_FORWARD_ALWAYS_ALLOW on: it then leaves that flag out,
+ * so the host can offer "Always allow" for it (it still asks by default, being destructive).
  *
  * A send the user cancelled in the native confirmation dialog is reported as a normal result
  * (`sent: false`), not as an error.
@@ -195,7 +197,7 @@ export function registerSendTools(server: McpServer, rt: ToolRuntime): void {
         from: fromField().optional(),
       }),
       annotations: annotations(forwardTitle, SEND_HINTS),
-      _meta: { ...REQUIRES_USER_INTERACTION_META },
+      _meta: rt.service.config.forwardAlwaysAllow ? {} : { ...REQUIRES_USER_INTERACTION_META },
     },
     (args, ctx) =>
       runTool(

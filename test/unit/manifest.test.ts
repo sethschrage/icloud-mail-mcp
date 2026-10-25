@@ -124,6 +124,7 @@ describe('manifest.json user_config', () => {
         'allowed_from',
         'allow_send',
         'allow_permanent_delete',
+        'forward_always_allow',
         'read_only',
         'confirm_dialog',
         'attachment_dir',

@@ -99,6 +99,7 @@ Every value is read from env. Treat `""` and **literal unexpanded placeholders m
 | `MAIL_ALLOWED_FROM` | – | Comma-separated extra addresses allowed as From. The allowed set is always `ICLOUD_EMAIL` ∪ `MAIL_FROM_ADDRESS` ∪ this list, matched case-insensitively. Any other From is rejected locally before SMTP. |
 | `MAIL_ALLOW_SEND` | `true` | If false, the send tools (`send_email`, `reply_to_message`, `forward_message`, `send_draft`) are **not registered**. Drafts still work. |
 | `MAIL_ALLOW_PERMANENT_DELETE` | `false` | If false, `delete_messages_permanently` is not registered. |
+| `MAIL_FORWARD_ALWAYS_ALLOW` | `false` | If true, `forward_message` is registered without `anthropic/requiresUserInteraction` (it stays destructive), so the host can offer "Always allow" for it. The other send tools keep the flag. |
 | `MAIL_READ_ONLY` | `false` | If true, register **only** read tools: no flag changes, moves, drafts or sends. This overrides the two settings above. |
 | `MAIL_CONFIRM_DIALOG` | `false` | If true (and on darwin), send and permanent-delete actions also need a click in a **native macOS dialog** shown by the server via `osascript` (§6.6). Claude cannot bypass this gate. |
 | `MAIL_MAX_SENDS_PER_HOUR` | `30` | In-process rolling rate limit across all send tools. `0` means unlimited. |
@@ -306,6 +307,8 @@ All take `mailbox` and `uids: int[]` (1..500 entries). They verify that the UIDs
 
 ### 6.6 Sending (`readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true`, plus `_meta: {"anthropic/requiresUserInteraction": true}`)
 
+`forward_message` leaves the `_meta` flag out when `MAIL_FORWARD_ALWAYS_ALLOW` is on (§3).
+
 Registered only if `MAIL_ALLOW_SEND` and not `MAIL_READ_ONLY`. Each description must say that it **sends real email immediately**, that Claude should only call it when the user has explicitly asked to send (not merely draft), and that it should prefer `save_draft` when unsure.
 
 15. **`send_email`**: `{ to, cc?, bcc?, subject, body, html?, attachments?, from?, reply_to_address? }`.
@@ -428,7 +431,7 @@ Registered only if `MAIL_ALLOW_SEND` and not `MAIL_READ_ONLY`. Each description 
   - `name: "icloud-mail"`, `display_name: "iCloud Mail"`, `author: {name: "Seth"}`.
   - `compatibility: {platforms: ["darwin"], runtimes: {node: ">=20.0.0"}}`.
   - The `tools` list must exactly match the registered tool names (all of them, including conditional ones).
-  - `user_config` exposes: `icloud_email` (required), `app_specific_password` (sensitive, required), `imap_username`, `from_address`, `from_name`, `allowed_from`, `allow_send` (default true), `allow_permanent_delete` (default false), `read_only` (default false), `confirm_dialog` (default false), `attachment_dir` (directory), `attach_from_dirs` (directory, `multiple: true` if it validates; else a comma-separated string), `max_body_chars`, `max_sends_per_hour`, `max_recipients_per_hour`, `max_recipients_per_day`, and the special-folder overrides `sent_mailbox`, `trash_mailbox`, `drafts_mailbox`, `archive_mailbox`, `junk_mailbox`.
+  - `user_config` exposes: `icloud_email` (required), `app_specific_password` (sensitive, required), `imap_username`, `from_address`, `from_name`, `allowed_from`, `allow_send` (default true), `allow_permanent_delete` (default false), `forward_always_allow` (default false), `read_only` (default false), `confirm_dialog` (default false), `attachment_dir` (directory), `attach_from_dirs` (directory, `multiple: true` if it validates; else a comma-separated string), `max_body_chars`, `max_sends_per_hour`, `max_recipients_per_hour`, `max_recipients_per_day`, and the special-folder overrides `sent_mailbox`, `trash_mailbox`, `drafts_mailbox`, `archive_mailbox`, `junk_mailbox`.
   - Wording must be true: Claude Desktop *normally* asks before a destructive tool (how often depends on the version and the user's answers), the Mac dialog is the guaranteed check, prompt-injection protection lowers the risk but cannot rule it out, and what Claude reads is processed by Anthropic.
   - Every optional string gets `default: ""`.
   - Validate it with the real CLI.

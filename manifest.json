@@ -29,6 +29,7 @@
         "MAIL_ALLOWED_FROM": "${user_config.allowed_from}",
         "MAIL_ALLOW_SEND": "${user_config.allow_send}",
         "MAIL_ALLOW_PERMANENT_DELETE": "${user_config.allow_permanent_delete}",
+        "MAIL_FORWARD_ALWAYS_ALLOW": "${user_config.forward_always_allow}",
         "MAIL_READ_ONLY": "${user_config.read_only}",
         "MAIL_CONFIRM_DIALOG": "${user_config.confirm_dialog}",
         "MAIL_ATTACHMENT_DIR": "${user_config.attachment_dir}",
@@ -219,6 +220,13 @@
       "type": "boolean",
       "title": "Allow permanent delete",
       "description": "Let Claude permanently delete messages, bypassing Trash. This cannot be undone. When off, Claude can still move mail to Trash.",
+      "required": false,
+      "default": false
+    },
+    "forward_always_allow": {
+      "type": "boolean",
+      "title": "Let me always allow forwarding",
+      "description": "Normally Claude asks before every send, with no way to skip it. When on, you can choose \"Always allow\" for forwarding (forward_message) in Claude's tool permissions. Other sends still ask every time. Leave off unless you trust every prompt and email Claude reads: a forward can send any message, with its attachments, to any address.",
       "required": false,
       "default": false
     },

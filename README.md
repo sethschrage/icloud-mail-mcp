@@ -130,6 +130,7 @@ After installing, Claude Desktop shows the settings form. You can change it late
 | Other From addresses | Further aliases Claude may send from, separated by commas. Anything else is refused. |
 | Allow sending | On by default. Turn off if Claude should only write drafts. |
 | Allow permanent delete | Off by default. See [Guardrails](#guardrails). |
+| Let me always allow forwarding | Off by default. Turn on so you can choose *Always allow* for forwarding in Claude. See [Guardrails](#guardrails). |
 | Read-only mode | Off by default. Turn on to let Claude only read and search. |
 | Confirm on my Mac before sending or permanently deleting | Off by default. Turn on for an extra macOS confirmation dialog before every send and permanent delete. Moving mail to Trash and deleting empty folders are not confirmed. |
 | Attachment download folder | Where downloaded attachments go. Default: *Downloads/iCloud Mail Attachments*. |
@@ -195,6 +196,13 @@ Moving mail to Trash and deleting empty folders are not confirmed.
 
 **Sending can be switched off** *("Allow sending")*. Claude then cannot send, reply, forward or
 send drafts; it can still save drafts, which you can review and send from Apple Mail.
+
+**Claude asks before every send** and offers no *Always allow* for sending, replying, forwarding
+or sending drafts. *"Let me always allow forwarding"* (off by default) relaxes this for forwarding
+only: Claude still asks the first time, but you can then choose *Always allow* for
+`forward_message` in its tool permissions. Turn it on only if you're comfortable with that: an
+email Claude reads could ask it to forward your mail (with attachments) to an outside address, and
+with *Always allow* nothing stops that except the send limits. The other send tools always ask.
 
 **Permanent deletion is off by default** *("Allow permanent delete")*. Deleting then means moving to
 Trash, so you can recover mistakes until Trash is emptied: iCloud normally keeps trashed mail for
@@ -276,6 +284,7 @@ or contain `${HOME}`, `${DOWNLOADS}`, `${DOCUMENTS}` or `${DESKTOP}`.
 | `MAIL_ALLOWED_FROM` | Other From addresses | – | Comma-separated extra allowed From addresses. |
 | `MAIL_ALLOW_SEND` | Allow sending | `true` | `false` removes `send_email`, `reply_to_message`, `forward_message` and `send_draft`. Drafts still work. |
 | `MAIL_ALLOW_PERMANENT_DELETE` | Allow permanent delete | `false` | `true` adds `delete_messages_permanently`. |
+| `MAIL_FORWARD_ALWAYS_ALLOW` | Let me always allow forwarding | `false` | `true` drops the always-ask flag (`anthropic/requiresUserInteraction`) from `forward_message`, so Claude can offer *Always allow* for it. |
 | `MAIL_READ_ONLY` | Read-only mode | `false` | Only the reading tools and `download_attachment`. Overrides the two above. |
 | `MAIL_CONFIRM_DIALOG` | Confirm on my Mac before sending or permanently deleting | `false` | Native macOS dialog before every send and permanent delete. |
 | `MAIL_MAX_SENDS_PER_HOUR` | Maximum emails sent per hour | `30` | Rolling limit across all send tools; `0` = unlimited. |

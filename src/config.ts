@@ -49,6 +49,8 @@ export interface Config {
   ownAddresses: string[];
   allowSend: boolean;
   allowPermanentDelete: boolean;
+  /** forward_message without `anthropic/requiresUserInteraction`, so hosts can offer "Always allow". */
+  forwardAlwaysAllow: boolean;
   readOnly: boolean;
   confirmDialog: boolean;
   maxSendsPerHour: number;
@@ -111,6 +113,7 @@ export const SETTING_LABELS: Readonly<Record<string, string>> = {
   MAIL_ALLOWED_FROM: 'Other From addresses (optional)',
   MAIL_ALLOW_SEND: 'Allow sending',
   MAIL_ALLOW_PERMANENT_DELETE: 'Allow permanent delete',
+  MAIL_FORWARD_ALWAYS_ALLOW: 'Let me always allow forwarding',
   MAIL_READ_ONLY: 'Read-only mode',
   MAIL_CONFIRM_DIALOG: 'Confirm on my Mac before sending or permanently deleting',
   MAIL_ATTACHMENT_DIR: 'Attachment download folder',
@@ -349,6 +352,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   const readOnly = bool('MAIL_READ_ONLY', false);
   const allowSend = bool('MAIL_ALLOW_SEND', true);
   const allowPermanentDelete = bool('MAIL_ALLOW_PERMANENT_DELETE', false);
+  const forwardAlwaysAllow = bool('MAIL_FORWARD_ALWAYS_ALLOW', false);
   let confirmDialog = bool('MAIL_CONFIRM_DIALOG', false);
   if (cloud && confirmDialog) {
     // Refuse rather than ignore: whoever set it expects sends to wait for a click that can never come.
@@ -494,6 +498,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     ownAddresses,
     allowSend,
     allowPermanentDelete,
+    forwardAlwaysAllow,
     readOnly,
     confirmDialog,
     maxSendsPerHour,

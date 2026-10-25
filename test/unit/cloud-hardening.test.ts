@@ -128,6 +128,22 @@ describe('cloud limits and texts', () => {
     }
   });
 
+  it('lets forwarding be always allowed only with MAIL_FORWARD_ALWAYS_ALLOW, keeping every other send gated', async () => {
+    const meta = async (env: Record<string, string>) => {
+      const handler = createCloudHandler({ env: cloudEnv({ IMAP_PORT: '9', ...env }) });
+      const { client, close } = await connectCloud(handler);
+      const tools = (await client.listTools()).tools;
+      await close();
+      await handler.close();
+      return Object.fromEntries(tools.map((t) => [t.name, { gated: t._meta?.['anthropic/requiresUserInteraction'] === true, destructive: t.annotations?.destructiveHint }]));
+    };
+    const off = await meta({});
+    for (const name of ['send_email', 'reply_to_message', 'forward_message', 'send_draft']) expect(off[name], name).toEqual({ gated: true, destructive: true });
+    const on = await meta({ MAIL_FORWARD_ALWAYS_ALLOW: 'true' });
+    expect(on['forward_message']).toEqual({ gated: false, destructive: true });
+    for (const name of ['send_email', 'reply_to_message', 'send_draft']) expect(on[name], name).toEqual({ gated: true, destructive: true });
+  });
+
   it('does not mention a Mac dialog for permanent deletion in the cloud', async () => {
     const handler = createCloudHandler({ env: cloudEnv({ IMAP_PORT: '9', MAIL_ALLOW_PERMANENT_DELETE: 'true' }) });
     const { client, close } = await connectCloud(handler);
