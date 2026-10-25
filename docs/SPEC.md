@@ -99,7 +99,7 @@ Every value is read from env. Treat `""` and **literal unexpanded placeholders m
 | `MAIL_ALLOWED_FROM` | – | Comma-separated extra addresses allowed as From. The allowed set is always `ICLOUD_EMAIL` ∪ `MAIL_FROM_ADDRESS` ∪ this list, matched case-insensitively. Any other From is rejected locally before SMTP. |
 | `MAIL_ALLOW_SEND` | `true` | If false, the send tools (`send_email`, `reply_to_message`, `forward_message`, `send_draft`) are **not registered**. Drafts still work. |
 | `MAIL_ALLOW_PERMANENT_DELETE` | `false` | If false, `delete_messages_permanently` is not registered. |
-| `MAIL_FORWARD_ALWAYS_ALLOW` | `false` | If true, `forward_message` is registered without `anthropic/requiresUserInteraction` (it stays destructive), so the host can offer "Always allow" for it. The other send tools keep the flag. |
+| `MAIL_FORWARD_ALWAYS_ALLOW` | `false` | If true, `forward_message` is registered without `anthropic/requiresUserInteraction` (it stays destructive), so the host can allow it without asking (claude.ai custom connectors were seen to default such a tool to "Always allow"). The other send tools keep the flag. |
 | `MAIL_READ_ONLY` | `false` | If true, register **only** read tools: no flag changes, moves, drafts or sends. This overrides the two settings above. |
 | `MAIL_CONFIRM_DIALOG` | `false` | If true (and on darwin), send and permanent-delete actions also need a click in a **native macOS dialog** shown by the server via `osascript` (§6.6). Claude cannot bypass this gate. |
 | `MAIL_MAX_SENDS_PER_HOUR` | `30` | In-process rolling rate limit across all send tools. `0` means unlimited. |

@@ -130,7 +130,7 @@ After installing, Claude Desktop shows the settings form. You can change it late
 | Other From addresses | Further aliases Claude may send from, separated by commas. Anything else is refused. |
 | Allow sending | On by default. Turn off if Claude should only write drafts. |
 | Allow permanent delete | Off by default. See [Guardrails](#guardrails). |
-| Let me always allow forwarding | Off by default. Turn on so you can choose *Always allow* for forwarding in Claude. See [Guardrails](#guardrails). |
+| Let me always allow forwarding | Off by default. Turn on to let Claude forward without asking (Claude may then allow it from the start). See [Guardrails](#guardrails). |
 | Read-only mode | Off by default. Turn on to let Claude only read and search. |
 | Confirm on my Mac before sending or permanently deleting | Off by default. Turn on for an extra macOS confirmation dialog before every send and permanent delete. Moving mail to Trash and deleting empty folders are not confirmed. |
 | Attachment download folder | Where downloaded attachments go. Default: *Downloads/iCloud Mail Attachments*. |
@@ -199,10 +199,12 @@ send drafts; it can still save drafts, which you can review and send from Apple 
 
 **Claude asks before every send** and offers no *Always allow* for sending, replying, forwarding
 or sending drafts. *"Let me always allow forwarding"* (off by default) relaxes this for forwarding
-only: Claude still asks the first time, but you can then choose *Always allow* for
-`forward_message` in its tool permissions. Turn it on only if you're comfortable with that: an
-email Claude reads could ask it to forward your mail (with attachments) to an outside address, and
-with *Always allow* nothing stops that except the send limits. The other send tools always ask.
+only: `forward_message` can then be set to *Always allow* in Claude's tool permissions. Claude may
+also set it that way on its own: a claude.ai custom connector showed it as *Always allow* as soon
+as it was offered. To keep approving forwards, set it to *Needs approval* there. Turn the setting
+on only if you're comfortable with that: an email Claude reads could ask it to forward your mail
+(with attachments) to an outside address, and with *Always allow* nothing stops that except the
+send limits. The other send tools always ask.
 
 **Permanent deletion is off by default** *("Allow permanent delete")*. Deleting then means moving to
 Trash, so you can recover mistakes until Trash is emptied: iCloud normally keeps trashed mail for

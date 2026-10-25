@@ -226,7 +226,7 @@
     "forward_always_allow": {
       "type": "boolean",
       "title": "Let me always allow forwarding",
-      "description": "Normally Claude asks before every send, with no way to skip it. When on, you can choose \"Always allow\" for forwarding (forward_message) in Claude's tool permissions. Other sends still ask every time. Leave off unless you trust every prompt and email Claude reads: a forward can send any message, with its attachments, to any address.",
+      "description": "Normally Claude asks before every send, with no way to skip it. When on, forwarding (forward_message) can be set to \"Always allow\" in Claude's tool permissions, and Claude may set it that way by itself; choose \"Needs approval\" there to keep being asked. Other sends still ask every time. Leave off unless you trust every prompt and email Claude reads: a forward can send any message, with its attachments, to any address.",
       "required": false,
       "default": false
     },

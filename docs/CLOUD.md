@@ -60,7 +60,7 @@ Access and login follow the pattern of your buxfer-mcp:
 | Password | macOS Keychain (via the extension settings) | Vercel env var (Sensitive), or a connector header |
 | Opening attachments | saved to `~/Downloads/iCloud Mail Attachments`; images and text also shown | not saved (no disk): images up to 3 MB and text up to 200 KB come back inline; other files (PDFs, documents) are described by name, type and size |
 | Attaching files | files from Desktop, Documents, Downloads | not available (no disk). Share files with a link from another connector (e.g. Google Drive) in the body, or forward an email with its attachments (`forward_message`, or `save_draft` with `forward_of`) |
-| Confirmation before sending | Claude's approval prompt, plus an optional Mac dialog | Claude's approval prompt. Send tools are marked destructive and as always requiring approval, so Claude asks on every send (with `MAIL_FORWARD_ALWAYS_ALLOW=true`, forwarding can be set to *Always allow*) |
+| Confirmation before sending | Claude's approval prompt, plus an optional Mac dialog | Claude's approval prompt. Send tools are marked destructive and as always requiring approval, so Claude asks on every send (with `MAIL_FORWARD_ALWAYS_ALLOW=true`, forwarding can be *Always allow*, and the connector may default to that) |
 | Send limits | counted in memory on your Mac | counted in Upstash Redis, shared by every Vercel instance |
 | Audit trail | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` | Vercel logs (lines start with `icloud-mail-audit`) |
 | Time limit per tool call | 120 s | 50 s at most (the Vercel function may run 60 s) |
@@ -130,8 +130,9 @@ Optional settings work exactly as in the Mac version, e.g.:
 - `MAIL_MAX_SENDS_PER_HOUR` / `MAIL_MAX_RECIPIENTS_PER_HOUR` / `MAIL_MAX_RECIPIENTS_PER_DAY`
   (defaults 30 / 150 / 500);
 - `MAIL_ALLOW_PERMANENT_DELETE=true`;
-- `MAIL_FORWARD_ALWAYS_ALLOW=true`, so you can set forwarding to *Always allow* in Claude (see
-  the README's Guardrails for the risk).
+- `MAIL_FORWARD_ALWAYS_ALLOW=true`, so forwarding can be *Always allow* in Claude. The connector
+  may switch it to that on its own; set it to *Needs approval* to keep being asked. The README's
+  Guardrails explain the risk.
 
 The full list is in the [README](../README.md#configuration-reference). Settings about local
 folders (`MAIL_ATTACHMENT_DIR`, `MAIL_ATTACH_FROM_DIRS`) are ignored in the cloud.

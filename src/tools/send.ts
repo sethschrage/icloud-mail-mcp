@@ -3,7 +3,8 @@
  * MAIL_ALLOW_SEND is on and MAIL_READ_ONLY is off. Every tool is destructive + open-world and
  * carries `anthropic/requiresUserInteraction`, so the host prompts on every call. The one
  * exception is forward_message with MAIL_FORWARD_ALWAYS_ALLOW on: it then leaves that flag out,
- * so the host can offer "Always allow" for it (it still asks by default, being destructive).
+ * so the host can allow it without asking. It stays marked destructive, but claude.ai custom
+ * connectors have been seen to set such a tool to "Always allow" straight away.
  *
  * A send the user cancelled in the native confirmation dialog is reported as a normal result
  * (`sent: false`), not as an error.
