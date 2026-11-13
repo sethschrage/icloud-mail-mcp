@@ -5,7 +5,9 @@
  * - make sure the iCloud-fidelity profiles (test-infra "icloud" and "no-uidplus") are running. Their
  *   suites cover the real-iCloud code paths (no MOVE, no SPECIAL-USE, no UIDPLUS), so a run without
  *   them must not pass silently: they are started if needed, and the run fails if they still are not
- *   up. Set ALLOW_PROFILE_SKIP=1 to skip those suites deliberately.
+ *   up. Set ALLOW_PROFILE_SKIP=1 to skip those suites deliberately;
+ * - the same for the Radicale CalDAV server (test-infra/caldav.sh, port 5232) behind the calendar
+ *   suites: started if needed, and the run fails without it unless ALLOW_CALDAV_SKIP=1.
  */
 import { execFile } from 'node:child_process';
 import net from 'node:net';
@@ -16,6 +18,7 @@ import { buildDev } from '../scripts/build-dev.mjs';
 
 const TEST_INFRA = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'test-infra');
 const PROFILE_PORTS = [2993, 3993];
+const CALDAV_PORT = 5232;
 
 function portOpen(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -34,8 +37,23 @@ async function profilesUp(): Promise<boolean> {
   return (await Promise.all(PROFILE_PORTS.map(portOpen))).every(Boolean);
 }
 
+async function ensureCaldav(): Promise<void> {
+  if (process.env['ALLOW_CALDAV_SKIP'] === '1' || (await portOpen(CALDAV_PORT))) return;
+  try {
+    await promisify(execFile)(path.join(TEST_INFRA, 'caldav.sh'), ['start'], { timeout: 60_000, maxBuffer: 10 * 1024 * 1024 });
+  } catch {
+    // reported below
+  }
+  if (!(await portOpen(CALDAV_PORT))) {
+    throw new Error(
+      'The CalDAV test server is not running (port 5232). Install Radicale (apt-get install -y radicale) and start it with `cd test-infra && ./caldav.sh start`, or set ALLOW_CALDAV_SKIP=1 to skip the calendar tests deliberately.',
+    );
+  }
+}
+
 export default async function setup(): Promise<void> {
   await buildDev();
+  await ensureCaldav();
   if (process.env['ALLOW_PROFILE_SKIP'] === '1') return;
   if (await profilesUp()) return;
   try {

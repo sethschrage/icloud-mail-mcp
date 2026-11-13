@@ -1,7 +1,9 @@
 # iCloud Mail for Claude: cloud version (Vercel)
 
 The same mail tools as the Claude Desktop extension, hosted on Vercel, so Claude can reach your
-iCloud Mail from claude.ai, the Claude mobile apps or Claude Code without your Mac running.
+iCloud Mail from claude.ai, the Claude mobile apps or Claude Code without your Mac running. The
+read-only calendar tools (`list_calendars`, `search_events`, `get_event`) come with it: they appear
+in the same connector, use the same login, and need no extra setup.
 
 The local extension keeps working exactly as before. The cloud version is a second entry point
 (`api/icloud-mail.js`, built from `src/http/`) in the same repository.
@@ -28,8 +30,9 @@ Claude (claude.ai, mobile, Claude Code)
 Vercel function  /api/icloud-mail          ← refuses every request without the access key
    │  IMAP (imap.mail.me.com:993, TLS)     ← iCloud login: connector headers, else Vercel env vars
    │  SMTP (smtp.mail.me.com:587, STARTTLS)
+   │  CalDAV (caldav.icloud.com → pNN-caldav.icloud.com, HTTPS; read-only)
    ▼
-iCloud Mail  ──sync──►  Apple Mail on your devices
+iCloud Mail and Calendar  ──sync──►  Apple Mail and Calendar on your devices
 
 Send limits ─► Upstash Redis (shared by every Vercel instance)
 Audit trail ─► Vercel logs
@@ -44,7 +47,8 @@ Access and login follow the pattern of your buxfer-mcp:
 - **iCloud login.** It comes from connector headers (`X-ICloud-Email`, `X-ICloud-Password`, and
   optionally `X-ICloud-From`) if the caller sends them, otherwise from the Vercel env vars
   `ICLOUD_EMAIL` / `ICLOUD_PASSWORD`. Headers never replace the access key.
-- **Connection reuse.** The IMAP connection for a login is kept while the Vercel instance stays
+- **Connection reuse.** The IMAP connection for a login (and its calendar discovery: which
+  `pNN-caldav.icloud.com` server holds your calendars) is kept while the Vercel instance stays
   warm. The cache is keyed by a SHA-256 of email + password, never the raw values. Up to 16
   logins are kept; the least recently used one is closed once no request is using it.
 - **Secrets stay hidden.** Passwords and the access key are never logged or returned. Error
@@ -65,8 +69,10 @@ Access and login follow the pattern of your buxfer-mcp:
 | Audit trail | `~/Library/Logs/icloud-mail-mcp/audit.jsonl` | Vercel logs (lines start with `icloud-mail-audit`) |
 | Time limit per tool call | 120 s | 50 s at most (the Vercel function may run 60 s) |
 
-All 19 tools are available in both, with the same names. Permanent delete stays off unless you
-set `MAIL_ALLOW_PERMANENT_DELETE=true`.
+All 22 tools (19 mail, 3 calendar) are available in both, with the same names. Permanent delete
+stays off unless you set `MAIL_ALLOW_PERMANENT_DELETE=true`. The calendar tools only read; set
+`CALENDAR_ENABLED=false` to remove them from the connector. Event times are shown in
+`MAIL_TIMEZONE`, so set it (Vercel runs in UTC).
 
 ## Deploy
 
@@ -130,6 +136,7 @@ Optional settings work exactly as in the Mac version, e.g.:
 - `MAIL_MAX_SENDS_PER_HOUR` / `MAIL_MAX_RECIPIENTS_PER_HOUR` / `MAIL_MAX_RECIPIENTS_PER_DAY`
   (defaults 30 / 150 / 500);
 - `MAIL_ALLOW_PERMANENT_DELETE=true`;
+- `CALENDAR_ENABLED=false` to leave out the calendar tools;
 - `MAIL_FORWARD_ALWAYS_ALLOW=true`, so forwarding can be *Always allow* in Claude. The connector
   may switch it to that on its own; set it to *Needs approval* to keep being asked. The README's
   Guardrails explain the risk.
@@ -251,8 +258,8 @@ You chose shared limits. With `MAIL_ALLOW_SEND=false` (drafts only), Upstash isn
   - To revoke access, change `MCP_ACCESS_KEY` in Vercel, redeploy, and update the connector.
 - **Password storage.** The app-specific password is stored as a Sensitive Vercel env var, not
   readable in the dashboard after it's saved.
-  - It can read and send mail. Apple's app-specific passwords also work for iCloud contacts and
-    calendars.
+  - It can read and send mail, and the server also uses it to read your iCloud calendars (Apple's
+    app-specific passwords work for iCloud contacts and calendars too).
   - Revoke it at account.apple.com at any time. Every app-specific password is revoked when your
     Apple Account password changes.
   - Using a separate one for the cloud version lets you revoke it without breaking the Mac
@@ -262,8 +269,9 @@ You chose shared limits. With `MAIL_ALLOW_SEND=false` (drafts only), Upstash isn
   - Vercel's own request logs, visible to your team only, may show request paths.
   - Prefer `Authorization: Bearer` in clients that support headers (Claude Code, and claude.ai's
     Request headers).
-- **Untrusted email content.** It's handled as in the Mac version: email content is marked as
-  untrusted, and every send needs your approval in Claude.
+- **Untrusted email content.** It's handled as in the Mac version: email content and calendar
+  event text (titles, notes, locations, attendee names) are marked as untrusted, and every send
+  needs your approval in Claude.
 - **Audit trail.** The Vercel logs keep an entry for every change and send (tool, account,
   recipients, subject, Message-ID; never bodies). Search the logs for `icloud-mail-audit`.
 
@@ -278,6 +286,8 @@ You chose shared limits. With `MAIL_ALLOW_SEND=false` (drafts only), Upstash isn
 | iCloud rejected the login | Use your primary iCloud Mail address and an app-specific password (not your Apple Account password). Create a new one if you changed your Apple Account password. |
 | "Not sent: … Upstash …" | Add Upstash for Redis (step 2) and redeploy, or check that its token is still valid. |
 | Dates are in UTC | Set `MAIL_TIMEZONE`. |
+| Calendar tools say the login was rejected, but mail works | Check that Calendars is turned on for iCloud in your Apple Account settings; the calendar login is `ICLOUD_EMAIL` (or the header login) with the same app-specific password. |
+| No calendar tools in Claude | `CALENDAR_ENABLED` is `false`, or Claude still has the old tool list: reconnect the connector. |
 | A tool times out | Each tool call stops after 50 s (`MAIL_OPERATION_TIMEOUT_SECONDS`; higher values are capped at 50 s), inside the function's 60 s `maxDuration` in `vercel.json`. Searches across all mailboxes can take longer; narrow the search. |
 | Logs | Vercel → the project → **Logs**. Set `MAIL_LOG_LEVEL=info` for more detail (never passwords or message text). |
 

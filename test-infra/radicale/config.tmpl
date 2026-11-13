@@ -1,0 +1,27 @@
+# Radicale (CalDAV) for the calendar integration tests. Rendered by caldav.sh into run/radicale/config:
+# @ROOT@ becomes the test-infra directory and @PORT@ the HTTPS port. Never reads /etc/radicale.
+[server]
+hosts = 127.0.0.1:@PORT@
+ssl = True
+certificate = @ROOT@/certs/server.crt
+key = @ROOT@/certs/server.key
+
+[auth]
+type = htpasswd
+htpasswd_filename = @ROOT@/radicale/users
+htpasswd_encryption = plain
+# No artificial delay after a failed login: the tests try a wrong password on purpose.
+delay = 0
+
+[rights]
+type = owner_only
+
+[storage]
+filesystem_folder = @ROOT@/run/radicale/collections
+
+[web]
+type = none
+
+[logging]
+level = warning
+mask_passwords = True

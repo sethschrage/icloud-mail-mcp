@@ -75,6 +75,10 @@ export interface Config {
   imap: { host: string; port: number; secure: boolean; allowPlaintext: boolean };
   smtp: { host: string; port: number; secure: boolean; requireTLS: boolean };
   tlsCaFile: string | undefined;
+  /** CALENDAR_ENABLED: register the read-only calendar tools (CalDAV). */
+  calendarEnabled: boolean;
+  /** CalDAV server (CALDAV_URL, https only; default iCloud). */
+  caldavUrl: string;
 }
 
 export interface ConfigResult {
@@ -127,6 +131,7 @@ export const SETTING_LABELS: Readonly<Record<string, string>> = {
   MAIL_DRAFTS_MAILBOX: 'Drafts folder (optional)',
   MAIL_ARCHIVE_MAILBOX: 'Archive folder (optional)',
   MAIL_JUNK_MAILBOX: 'Junk folder (optional)',
+  CALENDAR_ENABLED: 'Calendar access',
 };
 
 /** `"<settings title>" (ENV_VAR)` for env vars that have a settings field, else just the env var. */
@@ -482,6 +487,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
   if (!smtp.secure && !smtp.requireTLS) {
     warnings.push('SMTP_REQUIRE_TLS=false: the SMTP login (with the app-specific password) may be sent unencrypted if the server does not offer STARTTLS. Use this only for local testing.');
   }
+  const calendarEnabled = bool('CALENDAR_ENABLED', true);
+  const caldavRaw = str('CALDAV_URL');
+  let caldavUrl = 'https://caldav.icloud.com';
+  if (caldavRaw !== undefined) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(caldavRaw);
+    } catch {
+      parsed = null;
+    }
+    // The CalDAV login carries the app-specific password: only ever over TLS.
+    if (!parsed || parsed.protocol !== 'https:' || parsed.username || parsed.password) errors.push(`CALDAV_URL must be an https:// URL without a login in it; got "${caldavRaw}".`);
+    else caldavUrl = parsed.origin;
+  }
   const caRaw = str('MAIL_TLS_CA_FILE');
   const tlsCaFile = caRaw === undefined ? undefined : expandPath(caRaw, pathCtx);
 
@@ -519,6 +538,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: LoadCo
     imap,
     smtp,
     tlsCaFile,
+    calendarEnabled,
+    caldavUrl,
   };
   return { config, errors, warnings };
 }
@@ -534,6 +555,7 @@ export function effectiveFeatures(config: Config): {
   permanentDelete: boolean;
   drafts: boolean;
   mailboxChanges: boolean;
+  calendar: boolean;
 } {
   return {
     readOnly: config.readOnly,
@@ -541,6 +563,8 @@ export function effectiveFeatures(config: Config): {
     permanentDelete: config.allowPermanentDelete && !config.readOnly,
     drafts: !config.readOnly,
     mailboxChanges: !config.readOnly,
+    // The calendar tools only read, so read-only mode leaves them on.
+    calendar: config.calendarEnabled,
   };
 }
 

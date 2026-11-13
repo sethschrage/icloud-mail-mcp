@@ -248,9 +248,25 @@ describe('allowed From set', () => {
 describe('effective features', () => {
   it('read-only overrides send and permanent delete', () => {
     const { config } = load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_READ_ONLY: 'yes', MAIL_ALLOW_SEND: 'true', MAIL_ALLOW_PERMANENT_DELETE: '1' });
-    expect(effectiveFeatures(config)).toEqual({ readOnly: true, send: false, permanentDelete: false, drafts: false, mailboxChanges: false });
+    expect(effectiveFeatures(config)).toEqual({ readOnly: true, send: false, permanentDelete: false, drafts: false, mailboxChanges: false, calendar: true });
     const rw = load({ ICLOUD_EMAIL: 'me@icloud.com', MAIL_ALLOW_SEND: 'no', MAIL_ALLOW_PERMANENT_DELETE: 'true' }).config;
-    expect(effectiveFeatures(rw)).toEqual({ readOnly: false, send: false, permanentDelete: true, drafts: true, mailboxChanges: true });
+    expect(effectiveFeatures(rw)).toEqual({ readOnly: false, send: false, permanentDelete: true, drafts: true, mailboxChanges: true, calendar: true });
+  });
+
+  it('reads CALENDAR_ENABLED and CALDAV_URL', () => {
+    const def = load({ ICLOUD_EMAIL: 'me@icloud.com' });
+    expect(def.config.calendarEnabled).toBe(true);
+    expect(def.config.caldavUrl).toBe('https://caldav.icloud.com');
+    const off = load({ ICLOUD_EMAIL: 'me@icloud.com', CALENDAR_ENABLED: 'no', CALDAV_URL: 'https://127.0.0.1:5232/' });
+    expect(off.config.calendarEnabled).toBe(false);
+    expect(effectiveFeatures(off.config).calendar).toBe(false);
+    expect(off.config.caldavUrl).toBe('https://127.0.0.1:5232');
+    for (const bad of ['http://caldav.icloud.com', 'https://me:pw@caldav.icloud.com', 'not a url']) {
+      const r = load({ ICLOUD_EMAIL: 'me@icloud.com', CALDAV_URL: bad });
+      expect(r.errors.join(' '), bad).toMatch(/CALDAV_URL must be an https:\/\/ URL/);
+      expect(r.config.caldavUrl).toBe('https://caldav.icloud.com');
+    }
+    expect(load({ ICLOUD_EMAIL: 'me@icloud.com', CALENDAR_ENABLED: 'maybe' }).errors.join(' ')).toMatch(/Calendar access/);
   });
 });
 

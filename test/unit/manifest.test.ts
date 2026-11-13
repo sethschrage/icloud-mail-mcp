@@ -126,6 +126,7 @@ describe('manifest.json user_config', () => {
         'allow_permanent_delete',
         'forward_always_allow',
         'read_only',
+        'calendar_enabled',
         'confirm_dialog',
         'attachment_dir',
         'attach_from_dirs',
@@ -153,6 +154,7 @@ describe('manifest.json user_config', () => {
     expect(userConfig['allow_permanent_delete']?.default).toBe(false);
     expect(userConfig['read_only']?.default).toBe(false);
     expect(userConfig['confirm_dialog']?.default).toBe(false);
+    expect(userConfig['calendar_enabled']).toMatchObject({ type: 'boolean', default: true });
   });
 
   // integ-7 / docs-8: error messages name the settings the user actually sees.
@@ -229,6 +231,7 @@ describe('manifest.json user_config', () => {
       allow_send: false,
       allow_permanent_delete: true,
       read_only: true,
+      calendar_enabled: false,
       confirm_dialog: true,
       attachment_dir: '/Volumes/Data/Mail Attachments',
       attach_from_dirs: ['/Users/alex/Work, Inc', '/Volumes/Data'],
@@ -246,6 +249,7 @@ describe('manifest.json user_config', () => {
       allowSend: false,
       allowPermanentDelete: true,
       readOnly: true,
+      calendarEnabled: false,
       confirmDialog: true,
       attachmentDir: '/Volumes/Data/Mail Attachments',
       attachFromDirs: ['/Users/alex/Work, Inc', '/Volumes/Data'],

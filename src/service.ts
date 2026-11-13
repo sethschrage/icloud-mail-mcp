@@ -6,6 +6,8 @@
  */
 import type { ImapFlow, ImapFlowOptions } from 'imapflow';
 import { AuditLog, markAudited } from './audit.js';
+import type { HttpFn } from './calendar/caldav.js';
+import { CalendarService } from './calendar/service.js';
 import { effectiveFeatures, loadConfig, settingName, type Config, type ConfigResult, type LoadConfigOptions } from './config.js';
 import { passwordHelp, CredentialProvider, defaultExecFile, type CredentialOptions, type ExecFileFn } from './credentials.js';
 import { MailError, errorMessage } from './errors.js';
@@ -86,6 +88,8 @@ export interface MailServiceDeps {
   exec?: ExecFileFn;
   /** fetch used for the shared send-limit store (cloud; injectable for tests). */
   quotaFetch?: FetchFn;
+  /** HTTP exchange used by the CalDAV client (injectable for tests). */
+  calendarHttp?: HttpFn;
 }
 
 export interface OperationOptions {
@@ -244,6 +248,8 @@ export class MailService {
   /** Limits shared by every instance of the cloud version (no-op locally). */
   readonly sharedQuota: SharedQuota;
   readonly sender: Sender;
+  /** Read-only iCloud Calendar access (CalDAV), same login; its tools are registered when CALENDAR_ENABLED. */
+  readonly calendar: CalendarService;
   private readonly confirm: ConfirmFn;
   private readonly pathContext: PathContext | undefined;
   private readonly platform: NodeJS.Platform;
@@ -301,6 +307,15 @@ export class MailService {
       ...(deps.transportFactory ? { transportFactory: deps.transportFactory } : {}),
     });
     this.confirm = confirm;
+    this.calendar = new CalendarService({
+      config: this.config,
+      credentials: this.credentials,
+      tlsOptions: () => this.imap.tlsOptions(),
+      logger: this.logger,
+      assertConfigured: () => this.assertConfigured(),
+      ...(deps.calendarHttp ? { http: deps.calendarHttp } : {}),
+      ...(deps.now ? { now: deps.now } : {}),
+    });
   }
 
   get features(): ReturnType<typeof effectiveFeatures> {
@@ -435,6 +450,7 @@ export class MailService {
         permanent_delete: f.permanentDelete,
         read_only: f.readOnly,
         drafts: f.drafts,
+        calendar: f.calendar,
         confirm_dialog: c.confirmDialog,
         forward_always_allowable: c.forwardAlwaysAllow,
         save_sent_copy: c.saveSentCopy,
@@ -451,6 +467,7 @@ export class MailService {
         max_recipients: c.maxRecipients,
       },
       limits: { max_body_chars: c.maxBodyChars, max_attachment_mb: c.maxAttachmentMb, operation_timeout_seconds: c.operationTimeoutSeconds },
+      ...(f.calendar ? { calendar: { server: c.caldavUrl, login: c.email || null, calendar_home: this.calendar.client.homeUrl, access: 'read-only' } } : {}),
       runtime: c.runtime,
       ...(c.runtime === 'cloud'
         ? { attachments: 'Downloaded attachments are returned inline (images and text); the cloud version has no disk, so files cannot be saved or attached from disk.' }
@@ -1208,6 +1225,7 @@ export class MailService {
 
   /** Log out of IMAP (capped at 2 s) and refuse further work; for process shutdown. */
   async close(): Promise<void> {
+    this.calendar.close();
     await this.imap.close();
   }
 

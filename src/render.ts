@@ -14,20 +14,25 @@ import type { EmailAddress } from './smtp/address.js';
  * (from the end, or from the start with `keep: 'last'` for threads, which keep the most recent),
  * `returned`/`has_more` are corrected and a note says how to page.
  */
-export function renderListResult(result: unknown, options: { keep?: 'first' | 'last' } = {}): string {
-  const render = (r: unknown): string => `${UNTRUSTED_LIST_NOTE}\n${toJson(r)}`;
+export function renderListResult(
+  result: unknown,
+  options: { keep?: 'first' | 'last'; /** Array to shorten (default "messages"). */ key?: string; /** Untrusted reminder line. */ note?: string } = {},
+): string {
+  const key = options.key ?? 'messages';
+  const reminder = options.note ?? UNTRUSTED_LIST_NOTE;
+  const render = (r: unknown): string => `${reminder}\n${toJson(r)}`;
   let text = render(result);
   if (text.length <= MAX_RESULT_CHARS) return text;
-  const r = result as { messages?: unknown[]; returned?: number; has_more?: boolean; note?: string };
-  if (!r || typeof r !== 'object' || !Array.isArray(r.messages)) return truncateResult(text);
-  const all = r.messages;
+  const r = result as Record<string, unknown> & { returned?: number; has_more?: boolean; note?: string };
+  if (!r || typeof r !== 'object' || !Array.isArray(r[key])) return truncateResult(text);
+  const all = r[key] as unknown[];
   let lo = 0;
   let hi = all.length;
   const build = (n: number): Record<string, unknown> => {
     const messages = options.keep === 'last' ? all.slice(all.length - n) : all.slice(0, n);
-    const shortened: Record<string, unknown> = { ...r, messages, returned: messages.length };
+    const shortened: Record<string, unknown> = { ...r, [key]: messages, returned: messages.length };
     if ('has_more' in r) shortened['has_more'] = true;
-    shortened['note'] = `${r.note ? `${r.note} ` : ''}Result shortened to ${messages.length} of ${all.length} messages to stay under the size limit; use a smaller limit${options.keep === 'last' ? '' : ' or page with offset'}.`;
+    shortened['note'] = `${r.note ? `${r.note} ` : ''}Result shortened to ${messages.length} of ${all.length} ${key} to stay under the size limit; use a smaller limit${options.keep === 'last' ? '' : ' or page with offset'}.`;
     return shortened;
   };
   // Largest n whose rendering fits.

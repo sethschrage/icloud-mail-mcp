@@ -11,9 +11,11 @@ export const MAILBOX_TOOLS = ['mark_messages', 'move_messages', 'archive_message
 export const DRAFT_TOOLS = ['save_draft'];
 export const SEND_TOOLS = ['send_email', 'reply_to_message', 'forward_message', 'send_draft'];
 export const DELETE_TOOLS = ['delete_messages_permanently'];
+/** Read-only calendar tools (CALENDAR_ENABLED, default on; registered last). */
+export const CALENDAR_TOOLS = ['list_calendars', 'search_events', 'get_event'];
 
-export const DEFAULT_TOOLS = [...READ_TOOLS, ...FILE_TOOLS, ...MAILBOX_TOOLS, ...DRAFT_TOOLS, ...SEND_TOOLS];
-export const ALL_TOOLS = [...DEFAULT_TOOLS, ...DELETE_TOOLS];
+export const DEFAULT_TOOLS = [...READ_TOOLS, ...FILE_TOOLS, ...MAILBOX_TOOLS, ...DRAFT_TOOLS, ...SEND_TOOLS, ...CALENDAR_TOOLS];
+export const ALL_TOOLS = [...READ_TOOLS, ...FILE_TOOLS, ...MAILBOX_TOOLS, ...DRAFT_TOOLS, ...SEND_TOOLS, ...DELETE_TOOLS, ...CALENDAR_TOOLS];
 
 type Hints = { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean };
 const READ: Hints = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -41,6 +43,9 @@ export const EXPECTED_HINTS: Record<string, Hints> = {
   forward_message: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   send_draft: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   delete_messages_permanently: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  list_calendars: READ,
+  search_events: READ,
+  get_event: READ,
 };
 
 export const REQUIRES_USER_INTERACTION = new Set([...SEND_TOOLS, ...DELETE_TOOLS]);
@@ -66,6 +71,9 @@ export const SAMPLE_ARGS: Record<string, Record<string, unknown>> = {
   forward_message: { mailbox: 'INBOX', uid: 1, to: ['friend@example.com'] },
   send_draft: { uid: 1 },
   delete_messages_permanently: { mailbox: 'Deleted Messages', uids: [1] },
+  list_calendars: {},
+  search_events: {},
+  get_event: { href: '/testuser@icloud.test/home/x.ics' },
 };
 
 /** Env for a spawned server against test-infra (main instance unless IMAP_PORT is overridden). */

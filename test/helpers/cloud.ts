@@ -171,6 +171,8 @@ export function cloudEnv(overrides: Record<string, string | undefined> = {}): No
     SMTP_PORT: '1587',
     SMTP_SECURE: 'false',
     MAIL_TLS_CA_FILE: CA_FILE,
+    // test-infra/caldav.sh (Radicale, https with the test CA)
+    CALDAV_URL: 'https://127.0.0.1:5232',
     MAIL_TIMEZONE: 'America/Los_Angeles',
     MAIL_ALLOWED_FROM: 'testuser.alias@icloud.test',
     MAIL_FROM_NAME: 'Test User',

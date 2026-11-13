@@ -17,6 +17,9 @@ end to end without touching a real account. Nothing here relays mail anywhere.
   They exercise the COPY + EXPUNGE move fallback and name-based special-folder detection that the
   main instance never triggers. See [iCloud-fidelity profiles](#icloud-fidelity-profiles).
 
+- An optional **Radicale CalDAV server** (`./caldav.sh`, https on 5232) stands in for iCloud
+  Calendar (`caldav.icloud.com`) for the calendar tools. See [CalDAV server](#caldav-server-calendar-tools).
+
 ## Requirements
 
 | What | Version used here | Install |
@@ -523,11 +526,44 @@ from this container: `support.apple.com` and most docs sites are blocked by the 
 13. **No push or Apple extensions.** There is no `XAPPLEPUSHSERVICE`, no iCloud web features, and no
     Mail Drop for large attachments.
 
+## CalDAV server (calendar tools)
+
+[Radicale](https://radicale.org) 3 (Debian bookworm's `radicale` package is 3.1.8; `pip install
+radicale` works too) serves CalDAV over https on `127.0.0.1:5232` with the same server certificate
+and test CA as Dovecot. It reads only `radicale/config.tmpl` (rendered to `run/radicale/config`),
+keeps its calendars in `run/radicale/collections/` and logs to `logs/radicale.log`.
+
+| | |
+|---|---|
+| URL | `https://127.0.0.1:5232` (the server's `CALDAV_URL` in tests) |
+| Login | `testuser@icloud.test` / `app-specific-pass` (`radicale/users`, plain htpasswd) |
+| Principal and calendar home | `/testuser%40icloud.test/` (Radicale percent-encodes the `@` in hrefs) |
+
+```bash
+apt-get install -y radicale   # with policy-rc.d denying service starts, as for Dovecot
+./caldav.sh start             # idempotent; waits for the port
+./caldav.sh reset             # stop, wipe every calendar, start
+./caldav.sh stop
+```
+
+It starts empty: `test/integration/calendar.test.ts` resets it and creates its own calendars
+(*Home*, *Work* and a VTODO-only *Reminders* list with MKCALENDAR) and events (the fixtures in
+`test/helpers/calendar-fixtures.ts`). Like the profiles, it is optional but not silently skipped:
+the integration globalSetup starts it when port 5232 is closed and fails if it still is not up,
+unless `ALLOW_CALDAV_SKIP=1`.
+
+What Radicale does not imitate: iCloud's discovery hop to a `pNN-caldav.icloud.com` partition
+host, iCloud's unreliable recurrence handling in time-range queries, Apple's XML style (default
+`DAV:` namespace, CRs as `&#13;`), and the Reminders and scheduling collections in the calendar
+home. Those are covered by unit tests against a scripted fake (`test/helpers/fake-caldav.ts`).
+
 ## Files
 
 ```
 test-infra/
   start.sh  stop.sh  reset.sh        lifecycle (bash; no systemd); --profile <name|all> for profiles
+  caldav.sh                          Radicale CalDAV server: start|stop|reset|status
+  radicale/config.tmpl  radicale/users  Radicale config template and its htpasswd file
   dovecot/dovecot.conf.tmpl          Dovecot 2.3 config template, shared by main + profiles (edit this)
   dovecot/dovecot.conf               rendered by start.sh (generated, git-ignored)
   dovecot/profiles/<name>.env        iCloud-fidelity profile definitions (ports, capability list)

@@ -118,6 +118,8 @@ export function testEnv(dirs: TestDirs, overrides: Record<string, string | undef
     SMTP_PORT: '1587',
     SMTP_SECURE: 'false',
     MAIL_TLS_CA_FILE: CA_FILE,
+    // test-infra/caldav.sh (Radicale, https with the test CA)
+    CALDAV_URL: 'https://127.0.0.1:5232',
     MAIL_ATTACHMENT_DIR: dirs.attachmentDir,
     MAIL_ATTACH_FROM_DIRS: dirs.attachFrom,
     MAIL_AUDIT_LOG: dirs.auditLog,

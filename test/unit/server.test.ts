@@ -14,7 +14,7 @@ import { MailError } from '../../src/errors.js';
 import { MAX_RESULT_CHARS } from '../../src/format.js';
 import { createLogger, registerSecret, clearSecrets } from '../../src/log.js';
 import { summarizeThreadPrompt, triagePrompt } from '../../src/prompts.js';
-import { BASE_INSTRUCTIONS, buildInstructions, buildServer } from '../../src/server.js';
+import { BASE_INSTRUCTIONS, CALENDAR_INSTRUCTIONS, buildInstructions, buildServer } from '../../src/server.js';
 import { MailService } from '../../src/service.js';
 import { capResult, confirmAwareTimeoutMs, notFoundNote, runTool, type ToolRuntime } from '../../src/tools/common.js';
 import { ALL_TOOL_NAMES, TOOL_GROUPS, toolNamesFor } from '../../src/tools/index.js';
@@ -58,17 +58,19 @@ function audit(): Array<Record<string, unknown>> {
 }
 
 describe('tool catalogue', () => {
-  it('has 19 unique tool names in six groups', () => {
-    expect(ALL_TOOL_NAMES).toHaveLength(19);
-    expect(new Set(ALL_TOOL_NAMES).size).toBe(19);
-    expect(Object.keys(TOOL_GROUPS)).toEqual(['read', 'attachments', 'mailbox', 'drafts', 'send', 'delete']);
+  it('has 22 unique tool names in seven groups', () => {
+    expect(ALL_TOOL_NAMES).toHaveLength(22);
+    expect(new Set(ALL_TOOL_NAMES).size).toBe(22);
+    expect(Object.keys(TOOL_GROUPS)).toEqual(['read', 'attachments', 'mailbox', 'drafts', 'send', 'delete', 'calendar']);
   });
 
   it.each([
-    [{}, 18],
-    [{ MAIL_ALLOW_PERMANENT_DELETE: 'true' }, 19],
-    [{ MAIL_ALLOW_SEND: 'false' }, 14],
-    [{ MAIL_READ_ONLY: 'true', MAIL_ALLOW_PERMANENT_DELETE: 'true' }, 6],
+    [{}, 21],
+    [{ MAIL_ALLOW_PERMANENT_DELETE: 'true' }, 22],
+    [{ MAIL_ALLOW_SEND: 'false' }, 17],
+    [{ MAIL_READ_ONLY: 'true', MAIL_ALLOW_PERMANENT_DELETE: 'true' }, 9],
+    [{ CALENDAR_ENABLED: 'false' }, 18],
+    [{ MAIL_READ_ONLY: 'true', CALENDAR_ENABLED: 'false' }, 6],
   ])('registers exactly toolNamesFor(features) for %j', async (env, count) => {
     const svc = service(env);
     const client = await connect(svc);
@@ -82,19 +84,35 @@ describe('tool catalogue', () => {
     const svc = new MailService(loadConfig({}, { platform: 'linux', home: root }), { logger: quiet, platform: 'linux' });
     expect(svc.configErrors.length).toBeGreaterThan(0);
     const client = await connect(svc);
-    expect((await client.listTools()).tools).toHaveLength(18);
+    expect((await client.listTools()).tools).toHaveLength(21);
     const r = await client.callTool({ name: 'search_messages', arguments: {} });
     expect(r.isError).toBe(true);
+    const cal = await client.callTool({ name: 'search_events', arguments: {} });
+    expect(cal.isError).toBe(true);
+    expect((cal.content as Array<{ text: string }>)[0]?.text).toMatch(/not configured correctly/);
     await client.close();
   });
 });
 
 describe('instructions', () => {
   it('adds a note for the active mode', () => {
-    expect(buildInstructions(service())).toBe(`${BASE_INSTRUCTIONS}\n\nPermanent deletion is disabled; trash_messages is the way to delete mail.`);
+    expect(buildInstructions(service())).toBe(`${BASE_INSTRUCTIONS} ${CALENDAR_INSTRUCTIONS}\n\nPermanent deletion is disabled; trash_messages is the way to delete mail.`);
     expect(buildInstructions(service({ MAIL_READ_ONLY: 'true' }))).toMatch(/"Read-only mode" is on in the extension settings \(MAIL_READ_ONLY\)/);
     expect(buildInstructions(service({ MAIL_ALLOW_SEND: 'false', MAIL_ALLOW_PERMANENT_DELETE: 'true' }))).toMatch(/Sending is disabled \("Allow sending" is off in the extension settings; MAIL_ALLOW_SEND=false\): use save_draft/);
-    expect(buildInstructions(service({ MAIL_ALLOW_PERMANENT_DELETE: 'true' }))).toBe(BASE_INSTRUCTIONS);
+    expect(buildInstructions(service({ MAIL_ALLOW_PERMANENT_DELETE: 'true' }))).toBe(`${BASE_INSTRUCTIONS} ${CALENDAR_INSTRUCTIONS}`);
+    expect(buildInstructions(service({ MAIL_ALLOW_PERMANENT_DELETE: 'true', CALENDAR_ENABLED: 'false' }))).toBe(BASE_INSTRUCTIONS);
+    expect(CALENDAR_INSTRUCTIONS).toMatch(/untrusted/);
+  });
+
+  it('marks the calendar tools read-only, without the always-ask flag', async () => {
+    const client = await connect(service());
+    const tools = (await client.listTools()).tools.filter((t) => ['list_calendars', 'search_events', 'get_event'].includes(t.name));
+    expect(tools).toHaveLength(3);
+    for (const t of tools) {
+      expect(t.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+      expect(t._meta?.['anthropic/requiresUserInteraction']).toBeUndefined();
+    }
+    await client.close();
   });
 });
 

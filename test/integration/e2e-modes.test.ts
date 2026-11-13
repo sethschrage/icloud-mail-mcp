@@ -12,6 +12,7 @@ import { Client, type CallToolResult, type Tool } from '@modelcontextprotocol/cl
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import {
   ALL_TOOLS,
+  CALENDAR_TOOLS,
   DEFAULT_TOOLS,
   DELETE_TOOLS,
   DRAFT_TOOLS,
@@ -67,7 +68,7 @@ describe('tool registration per mode', () => {
 
   it('MAIL_READ_ONLY=true registers only read tools (overriding the other switches)', async () => {
     const names = await toolNames({ MAIL_READ_ONLY: 'true', MAIL_ALLOW_PERMANENT_DELETE: 'true', MAIL_ALLOW_SEND: 'true' });
-    expect(names).toEqual([...READ_TOOLS, ...FILE_TOOLS]);
+    expect(names).toEqual([...READ_TOOLS, ...FILE_TOOLS, ...CALENDAR_TOOLS]);
   });
 
   it('read-only mode ignores mark_as_read and says so', async () => {

@@ -3,7 +3,8 @@
  * - read tools and download_attachment: always;
  * - mailbox changes and save_draft: unless MAIL_READ_ONLY;
  * - send tools: MAIL_ALLOW_SEND and not read-only;
- * - delete_messages_permanently: MAIL_ALLOW_PERMANENT_DELETE and not read-only.
+ * - delete_messages_permanently: MAIL_ALLOW_PERMANENT_DELETE and not read-only;
+ * - calendar tools (read-only): CALENDAR_ENABLED, including in read-only mode.
  *
  * With an invalid configuration the same rules apply to the (defaulted) switches, so the tools are
  * still listed and every call explains what to fix.
@@ -11,6 +12,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import type { effectiveFeatures } from '../config.js';
 import { ATTACHMENT_TOOL_NAMES, registerAttachmentTools } from './attachments.js';
+import { CALENDAR_TOOL_NAMES, registerCalendarTools } from './calendar.js';
 import type { ToolRuntime } from './common.js';
 import { DELETE_TOOL_NAMES, registerDeleteTools } from './delete.js';
 import { DRAFT_TOOL_NAMES, registerDraftTools } from './drafts.js';
@@ -30,6 +32,7 @@ export const TOOL_GROUPS = {
   drafts: DRAFT_TOOL_NAMES,
   send: SEND_TOOL_NAMES,
   delete: DELETE_TOOL_NAMES,
+  calendar: CALENDAR_TOOL_NAMES,
 } as const;
 
 export const ALL_TOOL_NAMES: readonly string[] = Object.values(TOOL_GROUPS).flat();
@@ -43,6 +46,7 @@ export function toolNamesFor(features: Features): string[] {
     ...(features.drafts ? DRAFT_TOOL_NAMES : []),
     ...(features.send ? SEND_TOOL_NAMES : []),
     ...(features.permanentDelete ? DELETE_TOOL_NAMES : []),
+    ...(features.calendar ? CALENDAR_TOOL_NAMES : []),
   ];
 }
 
@@ -54,4 +58,5 @@ export function registerTools(server: McpServer, rt: ToolRuntime): void {
   if (f.drafts) registerDraftTools(server, rt);
   if (f.send) registerSendTools(server, rt);
   if (f.permanentDelete) registerDeleteTools(server, rt);
+  if (f.calendar) registerCalendarTools(server, rt);
 }

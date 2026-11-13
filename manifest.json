@@ -5,7 +5,7 @@
   "display_name": "iCloud Mail",
   "version": "0.1.0",
   "description": "Let Claude read, search, organize, draft and send your iCloud Mail, with guardrails. Works alongside Apple Mail.",
-  "long_description": "Connects Claude directly to your iCloud Mail account (imap.mail.me.com and smtp.mail.me.com) with an Apple **app-specific password**. It runs locally on your Mac and works alongside Apple Mail: everything Claude changes (read, flagged, moved, archived, trashed, drafts, sent mail) syncs to Apple Mail through iCloud. Works with @icloud.com, @me.com and @mac.com addresses and with iCloud+ custom domains.\n\n**What Claude can do**\n- Search mail and read messages, conversation threads and attachments\n- Mark messages read or unread, flag them (Apple Mail colours), move, archive and trash them\n- Create, rename and delete (empty) folders\n- Save drafts that appear in Apple Mail's Drafts folder, and send them once you approve\n- Send new mail, replies and forwards\n\n**Guardrails**\n- *Sending* can be switched off entirely (drafts keep working). Sending, replying and forwarding are marked as destructive actions, so Claude Desktop normally asks for your approval before each one; how often it asks depends on your Claude Desktop version and your answers to its prompts. For a check Claude cannot skip, turn on the Mac confirmation dialog.\n- *Permanent deletion* is off by default; deleting moves mail to Trash, which you can restore from until Trash is emptied (normally after about 30 days).\n- *Read-only mode* lets Claude only read and search: nothing in your mailbox can change.\n- Optional *native Mac confirmation dialog*: every send and permanent delete also needs a click on a macOS dialog that Claude cannot press for you. It lists every recipient.\n- At most 30 sends, 150 recipients per hour and 500 recipients per day (adjustable), and 50 recipients per message. Mail can only be sent from your own iCloud addresses.\n- Files can be attached only from the folders you choose (Desktop, Documents and Downloads by default); Claude can read files in those folders. Downloaded attachments are saved only into your attachment folder and are marked as downloaded from the internet.\n- Email content is handed to Claude marked as untrusted data, and Claude is told never to follow instructions found in emails. This lowers the risk of \"prompt injection\" but cannot rule it out, so keep reviewing send approvals, or turn on the Mac confirmation dialog.\n- Every change is recorded in an audit log (~/Library/Logs/icloud-mail-mcp/audit.jsonl), without message bodies.\n\n**Privacy**: your app-specific password is stored in the macOS Keychain by Claude Desktop and is only sent to Apple's mail servers. The extension runs on your Mac and has no servers of its own; the emails, search results and attachment contents Claude reads become part of your conversation and are processed by Anthropic like anything else you share with Claude.",
+  "long_description": "Connects Claude directly to your iCloud Mail account (imap.mail.me.com and smtp.mail.me.com) with an Apple **app-specific password**. It runs locally on your Mac and works alongside Apple Mail: everything Claude changes (read, flagged, moved, archived, trashed, drafts, sent mail) syncs to Apple Mail through iCloud. Works with @icloud.com, @me.com and @mac.com addresses and with iCloud+ custom domains.\n\n**What Claude can do**\n- Search mail and read messages, conversation threads and attachments\n- Mark messages read or unread, flag them (Apple Mail colours), move, archive and trash them\n- Create, rename and delete (empty) folders\n- Save drafts that appear in Apple Mail's Drafts folder, and send them once you approve\n- Send new mail, replies and forwards\n- Read your iCloud calendars: list them, find events in a date range (repeating events included) and read an event's details (read-only; can be switched off)\n\n**Guardrails**\n- *Sending* can be switched off entirely (drafts keep working). Sending, replying and forwarding are marked as destructive actions, so Claude Desktop normally asks for your approval before each one; how often it asks depends on your Claude Desktop version and your answers to its prompts. For a check Claude cannot skip, turn on the Mac confirmation dialog.\n- *Permanent deletion* is off by default; deleting moves mail to Trash, which you can restore from until Trash is emptied (normally after about 30 days).\n- *Read-only mode* lets Claude only read and search: nothing in your mailbox can change.\n- Optional *native Mac confirmation dialog*: every send and permanent delete also needs a click on a macOS dialog that Claude cannot press for you. It lists every recipient.\n- At most 30 sends, 150 recipients per hour and 500 recipients per day (adjustable), and 50 recipients per message. Mail can only be sent from your own iCloud addresses.\n- Files can be attached only from the folders you choose (Desktop, Documents and Downloads by default); Claude can read files in those folders. Downloaded attachments are saved only into your attachment folder and are marked as downloaded from the internet.\n- Email content (and calendar event text, such as invitations) is handed to Claude marked as untrusted data, and Claude is told never to follow instructions found in it. This lowers the risk of \"prompt injection\" but cannot rule it out, so keep reviewing send approvals, or turn on the Mac confirmation dialog.\n- Every change is recorded in an audit log (~/Library/Logs/icloud-mail-mcp/audit.jsonl), without message bodies.\n\n**Privacy**: your app-specific password is stored in the macOS Keychain by Claude Desktop and is only sent to Apple's mail and calendar servers. The extension runs on your Mac and has no servers of its own; the emails, calendar events, search results and attachment contents Claude reads become part of your conversation and are processed by Anthropic like anything else you share with Claude.",
   "author": {
     "name": "Seth"
   },
@@ -41,7 +41,8 @@
         "MAIL_TRASH_MAILBOX": "${user_config.trash_mailbox}",
         "MAIL_DRAFTS_MAILBOX": "${user_config.drafts_mailbox}",
         "MAIL_ARCHIVE_MAILBOX": "${user_config.archive_mailbox}",
-        "MAIL_JUNK_MAILBOX": "${user_config.junk_mailbox}"
+        "MAIL_JUNK_MAILBOX": "${user_config.junk_mailbox}",
+        "CALENDAR_ENABLED": "${user_config.calendar_enabled}"
       }
     }
   },
@@ -121,6 +122,18 @@
     {
       "name": "delete_messages_permanently",
       "description": "Permanently delete messages, bypassing Trash (off unless you allow it; cannot be undone)"
+    },
+    {
+      "name": "list_calendars",
+      "description": "List your iCloud calendars (read-only)"
+    },
+    {
+      "name": "search_events",
+      "description": "Find calendar events in a date range, with repeating events expanded (read-only)"
+    },
+    {
+      "name": "get_event",
+      "description": "Read one calendar event: times, location, notes, attendees, alerts and repeat rule (read-only)"
     }
   ],
   "tools_generated": false,
@@ -152,7 +165,9 @@
     "apple mail",
     "imap",
     "smtp",
-    "inbox"
+    "inbox",
+    "calendar",
+    "caldav"
   ],
   "license": "MIT",
   "privacy_policies": [
@@ -236,6 +251,13 @@
       "description": "Only allow reading and searching: no marking, moving, deleting, drafts or sending. Overrides the two settings above.",
       "required": false,
       "default": false
+    },
+    "calendar_enabled": {
+      "type": "boolean",
+      "title": "Calendar access",
+      "description": "Let Claude read your iCloud calendars (list calendars, search events, read an event), with the same login. Claude cannot change your calendars. Turn off to offer mail tools only.",
+      "required": false,
+      "default": true
     },
     "confirm_dialog": {
       "type": "boolean",

@@ -1,7 +1,7 @@
 # iCloud Mail for Claude
 
 Let Claude read, search, organize, draft and send your **iCloud Mail**, right from Claude Desktop
-on your Mac.
+on your Mac, and read your **iCloud calendars**.
 
 It is a small program (an MCP server) that runs on your Mac and connects directly to Apple's mail
 servers with an **app-specific password**. It works alongside Apple Mail: everything Claude changes,
@@ -52,9 +52,14 @@ It works with @icloud.com, @me.com and @mac.com addresses, and with iCloud+ cust
 | `forward_message` | Forwards an email, with its attachments. |
 | `send_draft` | Sends a draft from your Drafts folder exactly as it is saved there (including your own edits in Apple Mail), then removes it from Drafts. |
 | `delete_messages_permanently` | Deletes messages for good, bypassing Trash. **Off unless you turn it on.** |
+| `list_calendars` | Lists your iCloud calendars (not Reminders lists), with their colours. |
+| `search_events` | Finds events in a date range (this week by default, at most a year), across all calendars or the ones you name, optionally matching text in the title, location or notes. Repeating events are expanded into their individual dates, including dates that were moved, changed or deleted. Times are shown in your time zone. |
+| `get_event` | Reads one event in full: times, location, notes, organizer, attendees and their replies, alerts and how it repeats. |
 
 Claude can only use the tools your settings allow: with sending off, the four send tools are
-missing; in read-only mode only the first six are available. See [Guardrails](#guardrails).
+missing; in read-only mode only the first six mail tools and the calendar tools are available. The
+three calendar tools only read: Claude cannot create, change or delete events. Turn off *Calendar
+access* to remove them. See [Guardrails](#guardrails).
 
 There are also two ready-made prompts, **Triage Inbox** and **Summarize Thread**. They make Claude
 look at your mail with the reading tools only and suggest actions without taking any. For
@@ -132,6 +137,7 @@ After installing, Claude Desktop shows the settings form. You can change it late
 | Allow permanent delete | Off by default. See [Guardrails](#guardrails). |
 | Let me always allow forwarding | Off by default. Turn on to let Claude forward without asking (Claude may then allow it from the start). See [Guardrails](#guardrails). |
 | Read-only mode | Off by default. Turn on to let Claude only read and search. |
+| Calendar access | On by default. Lets Claude read your iCloud calendars with the same login; it cannot change them. Turn off for mail only. |
 | Confirm on my Mac before sending or permanently deleting | Off by default. Turn on for an extra macOS confirmation dialog before every send and permanent delete. Moving mail to Trash and deleting empty folders are not confirmed. |
 | Attachment download folder | Where downloaded attachments go. Default: *Downloads/iCloud Mail Attachments*. |
 | Attach files from | The folders Claude may attach files from. Default: Desktop, Documents and Downloads. Claude can also *read* files in these folders (it can attach one to a draft and open the draft), even with sending off. If you remove every folder, the defaults are used again; to stop Claude attaching local files, choose one empty folder (in a manual setup: `MAIL_ATTACH_FROM_DIRS=none`). |
@@ -159,6 +165,8 @@ Claude will tell you what to fix (it can call `get_account_info` for the details
 - "Forward the flight itinerary to my partner at sam@example.com."
 - "Delete the promotional emails from last week." (They go to Trash, where you can get them back.)
 - "Which of my emails are flagged red?" · "What's my biggest email this year?"
+- "What's on my calendar this week?" · "When is my next dentist appointment?" · "Who's invited
+  to Friday's planning meeting?"
 
 Tips:
 
@@ -214,8 +222,8 @@ Trash too, unless Claude saved it itself in the same session. Even when permanen
 allowed, Claude is told to prefer Trash.
 
 **Read-only mode** *("Read-only mode")*. Claude can only list folders, search, read messages and
-threads, view account info and save attachments to your download folder. Nothing in your mailbox
-can change. This overrides the two settings above.
+threads, view account info, save attachments to your download folder and read your calendars.
+Nothing in your mailbox can change. This overrides the two settings above.
 
 **Rate limits** *("Maximum emails sent per hour", default 30; "Maximum recipients per hour",
 default 150; "Maximum recipients per day", default 500)*. They count all sends, replies, forwards
@@ -245,6 +253,12 @@ to Claude clearly marked as *untrusted email content* (with markers an email can
 tells Claude never to follow instructions found in emails and never to send, forward, move or
 delete mail because an email asks it to. This lowers the risk of such "prompt injection" but cannot
 rule it out, so keep reviewing send approvals, or turn on the Mac confirmation dialog.
+
+**Calendars are read-only, and their text is untrusted too.** The calendar tools can list
+calendars, search events and read an event, nothing else (they are marked read-only and stay
+available in read-only mode). Event titles, notes, locations and attendee names can come from
+anyone who sends you an invitation, so they are handed to Claude marked as *untrusted calendar
+content*, the same way as email. *"Calendar access"* (on by default) removes the calendar tools.
 
 **No accidental purges.** iCloud has no real "move" command, so a move is a copy followed by
 deleting the original. The extension refuses a move or delete that would also permanently remove
@@ -288,6 +302,7 @@ or contain `${HOME}`, `${DOWNLOADS}`, `${DOCUMENTS}` or `${DESKTOP}`.
 | `MAIL_ALLOW_PERMANENT_DELETE` | Allow permanent delete | `false` | `true` adds `delete_messages_permanently`. |
 | `MAIL_FORWARD_ALWAYS_ALLOW` | Let me always allow forwarding | `false` | `true` drops the always-ask flag (`anthropic/requiresUserInteraction`) from `forward_message`, so Claude can offer *Always allow* for it. |
 | `MAIL_READ_ONLY` | Read-only mode | `false` | Only the reading tools and `download_attachment`. Overrides the two above. |
+| `CALENDAR_ENABLED` | Calendar access | `true` | `false` removes the calendar tools (`list_calendars`, `search_events`, `get_event`). They only read, so read-only mode keeps them. |
 | `MAIL_CONFIRM_DIALOG` | Confirm on my Mac before sending or permanently deleting | `false` | Native macOS dialog before every send and permanent delete. |
 | `MAIL_MAX_SENDS_PER_HOUR` | Maximum emails sent per hour | `30` | Rolling limit across all send tools; `0` = unlimited. |
 | `MAIL_MAX_RECIPIENTS` | – | `50` | Maximum To + Cc + Bcc per email (at most 500). |
@@ -301,11 +316,12 @@ or contain `${HOME}`, `${DOWNLOADS}`, `${DOCUMENTS}` or `${DESKTOP}`.
 | `MAIL_SAVE_SENT_COPY` | – | `true` | Save a copy of each sent email in Sent Messages (iCloud does not do this for mail sent this way). |
 | `MAIL_OPERATION_TIMEOUT_SECONDS` | – | `120` | Time limit per tool call (5–3600). |
 | `MAIL_LOG_LEVEL` | – | `warn` | Diagnostic logging: `error`, `warn`, `info` or `debug`. Never includes passwords or message text. |
-| `MAIL_TIMEZONE` | – | your Mac's | Time zone for dates, e.g. `Europe/Berlin`. |
+| `MAIL_TIMEZONE` | – | your Mac's | Time zone for dates, e.g. `Europe/Berlin`. Calendar event times are shown in it too, and date ranges for `search_events` are days in this zone. |
 | `MAIL_SENT_MAILBOX`, `MAIL_TRASH_MAILBOX`, `MAIL_ARCHIVE_MAILBOX`, `MAIL_DRAFTS_MAILBOX`, `MAIL_JUNK_MAILBOX` | Sent / Trash / Archive / Drafts / Junk folder | detected | Override the special folders. Without an override, a real server attribute wins, then a top-level folder with Apple's own name (*Sent Messages*, *Deleted Messages*, *Archive*, *Drafts*, *Junk*), and only then a similarly named top-level folder such as *Sent Items*. |
 | `IMAP_HOST`, `IMAP_PORT`, `IMAP_SECURE` | – | `imap.mail.me.com`, `993`, `true` | IMAP server (for testing). With `IMAP_SECURE=false`, STARTTLS is required. |
 | `IMAP_ALLOW_PLAINTEXT` | – | `false` | Tests only: with `IMAP_SECURE=false`, allow a login without encryption (reported as a configuration warning). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_REQUIRE_TLS` | – | `smtp.mail.me.com`, `587`, `false`, `true` | SMTP server (for testing). STARTTLS is required unless `SMTP_REQUIRE_TLS=false`. |
+| `CALDAV_URL` | – | `https://caldav.icloud.com` | Calendar server (for testing). Must be `https://`; the login is `ICLOUD_EMAIL` with the same app-specific password. |
 | `MAIL_TLS_CA_FILE` | – | – | Extra certificate authority to trust (for testing). Certificate checking can never be turned off. |
 
 Only for the [cloud version](#cloud-version-vercel) (set in the Vercel project, see [docs/CLOUD.md](docs/CLOUD.md)):
@@ -558,6 +574,13 @@ your Mac; install it from [nodejs.org](https://nodejs.org) if the extension does
 - **Sent copies** are not saved by iCloud for mail sent this way; the extension saves them (see
   [Troubleshooting](#troubleshooting)).
 - **Apple Mail-only features** such as rules, smart mailboxes and VIPs are not visible over IMAP.
+- **Calendars over CalDAV.** iCloud calendars are read over CalDAV (`caldav.icloud.com`, which
+  sends the extension on to your account's own `pNN-caldav.icloud.com` server). iCloud does not
+  reliably expand repeating events itself, so the extension expands them: it asks iCloud for the
+  events in the range plus every repeating event, and works out the dates (with moved, changed and
+  deleted occurrences) on your side. Calendars subscribed from a web address (webcal), Birthdays
+  and Siri Suggestions are not part of iCloud's CalDAV account and do not show up; neither do
+  Reminders.
 
 ---
 
@@ -566,12 +589,13 @@ your Mac; install it from [nodejs.org](https://nodejs.org) if the extension does
 - **Where your password lives.** With the extension, Claude Desktop stores the app-specific password
   in the macOS Keychain and hands it to the server when it starts. With a manual setup it stays in
   your own Keychain item and is read with Apple's `security` tool. It is only ever sent to Apple
-  (`imap.mail.me.com` and `smtp.mail.me.com`), always over an encrypted connection with certificate
+  (`imap.mail.me.com`, `smtp.mail.me.com` and, for calendars, `caldav.icloud.com` and your
+  account's `pNN-caldav.icloud.com` server), always over an encrypted connection with certificate
   checks. It never appears in logs, the audit log or error messages. Revoke it at
   account.apple.com at any time.
 - **What goes where.** The extension runs entirely on your Mac and has no servers of its own. It
-  talks only to Apple's mail servers. Whatever Claude reads (search results, email text, attachment
-  contents shown to it) becomes part of your conversation with Claude and is processed by Anthropic
+  talks only to Apple's mail and calendar servers. Whatever Claude reads (search results, email
+  text, calendar events, attachment contents shown to it) becomes part of your conversation with Claude and is processed by Anthropic
   like anything else you share in a chat. Attachments are saved only on your Mac, but small images
   (up to 3 MB), text files (up to 200 KB) and attached emails are also shown to Claude, and so sent
   to Anthropic, unless Claude downloads them with `return_content` off.
@@ -588,8 +612,9 @@ your Mac; install it from [nodejs.org](https://nodejs.org) if the extension does
 ## Development
 
 TypeScript (strict, ESM), Node.js 20 or newer. The server uses the MCP TypeScript SDK v2
-(`@modelcontextprotocol/server`), `imapflow` for IMAP, `nodemailer` for SMTP and MIME, and
-`html-to-text`. The design is described in [`docs/SPEC.md`](docs/SPEC.md).
+(`@modelcontextprotocol/server`), `imapflow` for IMAP, `nodemailer` for SMTP and MIME,
+`html-to-text`, and `ical.js` to read calendar events (CalDAV itself is a small client on Node's
+`https`). The design is described in [`docs/SPEC.md`](docs/SPEC.md).
 
 ```bash
 npm ci                   # install exactly the locked dependencies
@@ -614,13 +639,14 @@ src/server.ts         MCP server: instructions, tools, prompts
 src/config.ts         environment variables and --attach-from-dirs -> typed config
 src/service.ts        MailService: every mail operation the tools use
 src/imap/  src/smtp/  IMAP connection, search, fetch, moves; composing and sending
+src/calendar/         read-only CalDAV client, iCalendar parsing and recurrence expansion
 src/safety/           confirmation dialog, path confinement, untrusted-content wrapping
 src/tools/            one file per tool group
 manifest.json         the .mcpb manifest (tools list checked against the code by test/unit/manifest.test.ts)
 scripts/              build-dev.mjs, build.mjs, pack.mjs, make-icon.mjs
 test/unit/            unit tests
 test/integration/     service and MCP end-to-end tests, bundle smoke test
-test-infra/           local Dovecot IMAP server + SMTP sink that imitate iCloud
+test-infra/           local Dovecot IMAP server + SMTP sink that imitate iCloud, Radicale for CalDAV
 ```
 
 **The `.mcpb` package.** `npm run pack` bundles `src/index.ts` with esbuild into a single minified
@@ -638,16 +664,18 @@ targets Linux (a container or VM on a Mac); see [`test-infra/README.md`](test-in
 cd test-infra
 ./reset.sh                    # start (or restart) and reseed: IMAP 1143/1993, SMTP 1587
 ./reset.sh --profile all      # also the iCloud-like profiles: "icloud" (2993) and "no-uidplus" (3993)
-./stop.sh && ./stop.sh --profile all
+./caldav.sh start             # Radicale CalDAV server for the calendar tests (https 5232)
+./stop.sh && ./stop.sh --profile all && ./caldav.sh stop
 ```
 
 The integration suites reset the server themselves before tests that change mail, and run one
 file at a time. The *icloud* profile advertises what iCloud advertises (no MOVE, no SPECIAL-USE),
 and *no-uidplus* also lacks UIDPLUS. `npm run test:integration` fails when the profiles are not
 running (start them with `./reset.sh --profile all`); set `ALLOW_PROFILE_SKIP=1` to skip those
-tests deliberately. iCloud behaviour that Dovecot cannot imitate (ghost UIDs, stuck commands,
+tests deliberately; the same goes for the CalDAV server and `ALLOW_CALDAV_SKIP=1`. iCloud behaviour that Dovecot cannot imitate (ghost UIDs, stuck commands,
 failures between copy and delete, login refusals) is covered by unit tests against a scripted fake
-server (`test/helpers/fake-icloud-imap.ts`). The
+server (`test/helpers/fake-icloud-imap.ts`), and iCloud's CalDAV layout by a scripted fake
+(`test/helpers/fake-caldav.ts`). The
 bundle smoke test (`test/integration/bundle-smoke.test.ts`) packs the real `.mcpb`, unpacks it
 outside the project and runs it with exactly the command line and environment Claude Desktop
 derives from the manifest.
